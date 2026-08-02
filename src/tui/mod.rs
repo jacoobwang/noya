@@ -8,7 +8,10 @@ mod ui;
 pub use app::AppInfo;
 use app::{App, TuiAction};
 
-use crate::{Agent, AgentEvent, ApprovalPrompt, TurnControl};
+use crate::{
+    Agent, AgentEvent, ApprovalPrompt, TurnControl,
+    session::{CreateSession, SessionFilter, SessionManager, SessionSummary, Transcript},
+};
 use anyhow::{Context, Result};
 use crossterm::terminal;
 use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend};
@@ -54,13 +57,37 @@ impl UiRuntime {
 enum AgentCommand {
     Submit(String),
     Reset,
+    NewSession,
+    ListSessions,
+    ResumeSession(String),
+    RenameSession(String),
+    Retry,
+    Compact,
     Cancel,
     Shutdown,
 }
 
+enum HostEvent {
+    Agent(AgentEvent),
+    SessionChanged {
+        summary: SessionSummary,
+        transcript: Transcript,
+        log_path: Option<std::path::PathBuf>,
+        context_tokens: usize,
+    },
+    SessionUpdated {
+        summary: SessionSummary,
+        log_path: Option<std::path::PathBuf>,
+        context_tokens: usize,
+    },
+    SessionList(Vec<SessionSummary>),
+    RetrySubmitted(String),
+    Notice(String),
+}
+
 struct AgentHost {
     command_tx: mpsc::UnboundedSender<AgentCommand>,
-    event_rx: mpsc::UnboundedReceiver<AgentEvent>,
+    event_rx: mpsc::UnboundedReceiver<HostEvent>,
     approval_rx: mpsc::UnboundedReceiver<ApprovalPrompt>,
 }
 
@@ -106,13 +133,19 @@ pub fn restore_terminal() -> Result<()> {
 
 async fn run_loop(terminal: &mut NoyaTerminal, agent: Agent, info: AppInfo) -> Result<()> {
     let mut app = App::new(info);
+    app.load_session(
+        agent.session_summary(),
+        agent.transcript(),
+        agent.session_log_path(),
+        agent.context_token_estimate(),
+    );
     app.add_message(app::Message::new(
         app::MessageKind::System,
         "Noya ready. Type a request or /help.",
     ));
     let mut ui_runtime = UiRuntime::default();
     let mut input_events = event::EventHandler::new(Duration::from_millis(80));
-    let mut host = spawn_agent_host(agent);
+    let mut host = spawn_agent_host(agent, SessionManager::discover()?);
     let mut approval_response: Option<(String, oneshot::Sender<crate::ApprovalDecision>)> = None;
 
     loop {
@@ -139,11 +172,37 @@ async fn run_loop(terminal: &mut NoyaTerminal, agent: Agent, info: AppInfo) -> R
                     &mut ui_runtime,
                 );
             }
-            Some(agent_event) = host.event_rx.recv() => {
-                if matches!(agent_event, AgentEvent::TurnCompleted) {
-                    approval_response = None;
+            Some(host_event) = host.event_rx.recv() => {
+                match host_event {
+                    HostEvent::Agent(agent_event) => {
+                        if matches!(agent_event, AgentEvent::TurnCompleted { .. }) {
+                            approval_response = None;
+                        }
+                        app.handle_agent_event(agent_event);
+                    }
+                    HostEvent::SessionChanged { summary, transcript, log_path, context_tokens } => {
+                        ui_runtime.clear();
+                        app.load_session(summary, transcript, log_path, context_tokens);
+                        app.add_message(app::Message::new(app::MessageKind::System, "Session ready."));
+                    }
+                    HostEvent::SessionUpdated { summary, log_path, context_tokens } => {
+                        app.update_session(summary, log_path, context_tokens);
+                    }
+                    HostEvent::SessionList(summaries) => {
+                        app.add_message(app::Message::new(
+                            app::MessageKind::System,
+                            render_session_list(&summaries),
+                        ));
+                    }
+                    HostEvent::RetrySubmitted(input) => {
+                        app.add_message(app::Message::new(app::MessageKind::User, input));
+                        app.agent_state = app::AgentState::Thinking;
+                    }
+                    HostEvent::Notice(message) => {
+                        app.add_message(app::Message::new(app::MessageKind::System, message));
+                        app.agent_state = app::AgentState::Idle;
+                    }
                 }
-                app.handle_agent_event(agent_event);
             }
             Some(prompt) = host.approval_rx.recv() => {
                 approval_response = Some((prompt.request.request_id.clone(), prompt.respond));
@@ -168,17 +227,36 @@ fn apply_action(
 ) {
     match action {
         TuiAction::None => {}
+        TuiAction::Clear => ui_runtime.clear(),
         TuiAction::Submit(input) => {
             if command_tx.send(AgentCommand::Submit(input)).is_err() {
                 app.handle_agent_event(AgentEvent::Error {
+                    turn_id: None,
                     message: "Agent host is unavailable".to_string(),
                     recoverable: false,
                 });
             }
         }
         TuiAction::Reset => {
-            ui_runtime.clear();
             let _ = command_tx.send(AgentCommand::Reset);
+        }
+        TuiAction::NewSession => {
+            let _ = command_tx.send(AgentCommand::NewSession);
+        }
+        TuiAction::ListSessions => {
+            let _ = command_tx.send(AgentCommand::ListSessions);
+        }
+        TuiAction::ResumeSession(prefix) => {
+            let _ = command_tx.send(AgentCommand::ResumeSession(prefix));
+        }
+        TuiAction::RenameSession(title) => {
+            let _ = command_tx.send(AgentCommand::RenameSession(title));
+        }
+        TuiAction::Retry => {
+            let _ = command_tx.send(AgentCommand::Retry);
+        }
+        TuiAction::Compact => {
+            let _ = command_tx.send(AgentCommand::Compact);
         }
         TuiAction::Cancel => {
             app.status_message = Some("Cancelling current turn…".to_string());
@@ -286,50 +364,95 @@ fn transcript_line_range(
     start..ready_lines.max(start).min(total_lines)
 }
 
-fn spawn_agent_host(mut agent: Agent) -> AgentHost {
+fn spawn_agent_host(mut agent: Agent, manager: SessionManager) -> AgentHost {
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (approval_tx, approval_rx) = mpsc::unbounded_channel();
 
     tokio::spawn(async move {
         while let Some(command) = command_rx.recv().await {
+            let command = match command {
+                AgentCommand::Retry => match agent.retry_input() {
+                    Some(input) => {
+                        let _ = event_tx.send(HostEvent::RetrySubmitted(input.clone()));
+                        AgentCommand::Submit(input)
+                    }
+                    None => {
+                        send_host_error(
+                            &event_tx,
+                            "No failed, cancelled, or interrupted turn to retry.",
+                        );
+                        continue;
+                    }
+                },
+                command => command,
+            };
             match command {
                 AgentCommand::Submit(input) => {
+                    let active_workspace = agent.session_summary().workspace;
                     let control = TurnControl::interactive(approval_tx.clone());
                     let active_control = control.clone();
                     let turn_events = event_tx.clone();
                     let mut task = tokio::spawn(async move {
+                        let mut completion_event = None;
                         let result = agent
                             .turn_with_control(
                                 input,
                                 |event| {
-                                    let _ = turn_events.send(event);
+                                    if matches!(event, AgentEvent::TurnCompleted { .. }) {
+                                        completion_event = Some(event);
+                                    } else {
+                                        let _ = turn_events.send(HostEvent::Agent(event));
+                                    }
                                 },
                                 control,
                             )
                             .await;
-                        (agent, result)
+                        let auto_compacted = if result.is_ok() {
+                            agent.auto_compact_if_needed().await
+                        } else {
+                            Ok(false)
+                        };
+                        if let Some(event) = completion_event {
+                            let _ = turn_events.send(HostEvent::Agent(event));
+                        }
+                        (agent, result, auto_compacted)
                     });
 
                     loop {
                         tokio::select! {
                             joined = &mut task => {
                                 match joined {
-                                    Ok((returned_agent, result)) => {
+                                    Ok((returned_agent, result, auto_compacted)) => {
                                         agent = returned_agent;
                                         if let Err(error) = result {
-                                            let _ = event_tx.send(AgentEvent::Error {
+                                            let _ = event_tx.send(HostEvent::Agent(AgentEvent::Error {
+                                                turn_id: None,
                                                 message: error.to_string(),
                                                 recoverable: true,
-                                            });
-                                            let _ = event_tx.send(AgentEvent::TurnCompleted);
+                                            }));
                                         }
+                                        match auto_compacted {
+                                            Ok(true) => {
+                                                let _ = event_tx.send(HostEvent::Notice(
+                                                    "Session context was compacted automatically."
+                                                        .to_string(),
+                                                ));
+                                            }
+                                            Ok(false) => {}
+                                            Err(error) => send_host_error(
+                                                &event_tx,
+                                                &format!("Automatic compaction failed: {error}"),
+                                            ),
+                                        }
+                                        let _ = event_tx.send(session_updated(&agent));
                                     }
                                     Err(error) => {
-                                        let _ = event_tx.send(AgentEvent::Error {
+                                        let _ = event_tx.send(HostEvent::Agent(AgentEvent::Error {
+                                            turn_id: None,
                                             message: format!("Agent task failed: {error}"),
                                             recoverable: false,
-                                        });
+                                        }));
                                         return;
                                     }
                                 }
@@ -342,24 +465,95 @@ fn spawn_agent_host(mut agent: Agent) -> AgentHost {
                                     let _ = task.await;
                                     return;
                                 }
-                                Some(AgentCommand::Submit(_)) | Some(AgentCommand::Reset) => {
-                                    let _ = event_tx.send(AgentEvent::Error {
-                                        message: "Agent is busy".to_string(),
-                                        recoverable: true,
-                                    });
+                                Some(AgentCommand::Submit(_))
+                                | Some(AgentCommand::Reset)
+                                | Some(AgentCommand::NewSession)
+                                | Some(AgentCommand::ResumeSession(_))
+                                | Some(AgentCommand::RenameSession(_))
+                                | Some(AgentCommand::Retry)
+                                | Some(AgentCommand::Compact) => {
+                                    send_host_error(&event_tx, "Agent is busy");
                                 }
+                                Some(AgentCommand::ListSessions) => send_session_list_for_workspace(
+                                    &event_tx,
+                                    &manager,
+                                    active_workspace.clone(),
+                                ),
                             }
                         }
                     }
                 }
                 AgentCommand::Reset => {
                     if let Err(error) = agent.reset() {
-                        let _ = event_tx.send(AgentEvent::Error {
-                            message: format!("Failed to reset session: {error}"),
-                            recoverable: true,
-                        });
+                        send_host_error(&event_tx, &format!("Failed to reset context: {error}"));
+                    } else {
+                        let _ = event_tx.send(HostEvent::Notice("Context reset.".to_string()));
+                        let _ = event_tx.send(session_updated(&agent));
                     }
                 }
+                AgentCommand::NewSession => {
+                    let summary = agent.session_summary();
+                    match manager
+                        .create(CreateSession {
+                            workspace: summary.workspace,
+                            model: summary.model,
+                            model_id: summary.model_id,
+                        })
+                        .and_then(|session| agent.replace_session(session))
+                    {
+                        Ok(()) => {
+                            let _ = event_tx.send(session_changed(&agent));
+                        }
+                        Err(error) => send_host_error(
+                            &event_tx,
+                            &format!("Failed to create session: {error}"),
+                        ),
+                    }
+                }
+                AgentCommand::ListSessions => send_session_list(&event_tx, &manager, &agent),
+                AgentCommand::ResumeSession(prefix) => {
+                    let result = manager
+                        .resolve_prefix(&prefix, false)
+                        .and_then(|id| manager.open(id))
+                        .and_then(|session| agent.replace_session(session));
+                    match result {
+                        Ok(()) => {
+                            let _ = event_tx.send(session_changed(&agent));
+                        }
+                        Err(error) => send_host_error(
+                            &event_tx,
+                            &format!("Failed to resume session: {error}"),
+                        ),
+                    }
+                }
+                AgentCommand::RenameSession(title) => match agent.rename_session(title) {
+                    Ok(()) => {
+                        let _ = event_tx.send(session_updated(&agent));
+                        let _ = event_tx.send(HostEvent::Notice("Session renamed.".to_string()));
+                    }
+                    Err(error) => {
+                        send_host_error(&event_tx, &format!("Failed to rename session: {error}"))
+                    }
+                },
+                AgentCommand::Compact => match agent.compact().await {
+                    Ok(true) => {
+                        let _ = event_tx.send(HostEvent::Notice(
+                            "Session context compacted; full transcript remains available."
+                                .to_string(),
+                        ));
+                        let _ = event_tx.send(session_updated(&agent));
+                    }
+                    Ok(false) => {
+                        let _ = event_tx.send(HostEvent::Notice(
+                                "Nothing to compact; at least four recent completed turns are always retained."
+                                    .to_string(),
+                            ));
+                    }
+                    Err(error) => {
+                        send_host_error(&event_tx, &format!("Failed to compact session: {error}"))
+                    }
+                },
+                AgentCommand::Retry => unreachable!("retry is normalized before dispatch"),
                 AgentCommand::Cancel => {}
                 AgentCommand::Shutdown => break,
             }
@@ -371,6 +565,72 @@ fn spawn_agent_host(mut agent: Agent) -> AgentHost {
         event_rx,
         approval_rx,
     }
+}
+
+fn session_changed(agent: &Agent) -> HostEvent {
+    HostEvent::SessionChanged {
+        summary: agent.session_summary(),
+        transcript: agent.transcript(),
+        log_path: agent.session_log_path(),
+        context_tokens: agent.context_token_estimate(),
+    }
+}
+
+fn session_updated(agent: &Agent) -> HostEvent {
+    HostEvent::SessionUpdated {
+        summary: agent.session_summary(),
+        log_path: agent.session_log_path(),
+        context_tokens: agent.context_token_estimate(),
+    }
+}
+
+fn send_host_error(sender: &mpsc::UnboundedSender<HostEvent>, message: &str) {
+    let _ = sender.send(HostEvent::Agent(AgentEvent::Error {
+        turn_id: None,
+        message: message.to_string(),
+        recoverable: true,
+    }));
+}
+
+fn send_session_list(
+    sender: &mpsc::UnboundedSender<HostEvent>,
+    manager: &SessionManager,
+    agent: &Agent,
+) {
+    send_session_list_for_workspace(sender, manager, agent.session_summary().workspace);
+}
+
+fn send_session_list_for_workspace(
+    sender: &mpsc::UnboundedSender<HostEvent>,
+    manager: &SessionManager,
+    workspace: std::path::PathBuf,
+) {
+    match manager.list(SessionFilter {
+        workspace: Some(workspace),
+        include_archived: false,
+    }) {
+        Ok(summaries) => {
+            let _ = sender.send(HostEvent::SessionList(summaries));
+        }
+        Err(error) => send_host_error(sender, &format!("Failed to list sessions: {error}")),
+    }
+}
+
+fn render_session_list(summaries: &[SessionSummary]) -> String {
+    if summaries.is_empty() {
+        return "No sessions found for this workspace.".to_string();
+    }
+    let mut lines = vec!["Sessions:".to_string()];
+    for summary in summaries {
+        let id = summary.session_id.to_string();
+        lines.push(format!(
+            "{}  {:>3} turns  {}",
+            &id[..12],
+            summary.completed_turns,
+            summary.title
+        ));
+    }
+    lines.join("\n")
 }
 
 #[cfg(test)]

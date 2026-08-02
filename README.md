@@ -9,16 +9,16 @@ Noya is a standalone coding-agent prototype focused on development tasks inside 
 ```text
 CLI / future HTTP host
           |
-       Agent  ← session + turn/tool loop + events
-       /   \
-  Prompt   ToolRegistry
-    |       |
- workspace  read/list/search/patch/write/git/run
+       Agent  ← turn/tool loop + events
+      /  |  \
+Session Prompt ToolRegistry
+   |      |       |
+ JSONL workspace  read/list/search/patch/write/git/run
           |
        LlmClient (OpenAI-compatible)
 ```
 
-`Agent` is the single deep-module interface a host needs to use: submit a user turn and consume the resulting `AgentEvent` stream. The LLM and tools are adapters behind stable seams, allowing future hosts such as `agentd`, WebSocket services, or IDE integrations.
+`Agent` is the runtime interface a host uses to submit turns and consume `AgentEvent` streams. `Session` is the durable source of conversation and model context; the LLM and tools remain adapters behind stable seams.
 
 The source tree is organized by responsibility:
 
@@ -28,6 +28,7 @@ src/
   agent/    turn loop, events, cancellation, optional approval, and prompt
   llm/      OpenAI-compatible client, protocol DTOs, and SSE handling
   model/    model catalog, runtime configuration, and local credentials
+  session/  append-only JSONL, replay projections, recovery, and compaction
   tools/    tool registry, filesystem/patch/Git tools, and command execution
   tui/      terminal host, state, input events, and rendering
 ```
@@ -84,6 +85,23 @@ Credentials are stored in `noya/credentials.json` under the current user's syste
 
 Noya starts in an inline TUI. Sent user messages are right-aligned and Agent output is left-aligned. Agent responses are streamed, rendered as Markdown, and written to native terminal scrollback while generation is still in progress. Supported Markdown includes headings, emphasis, inline code, code blocks, lists, blockquotes, and links. `/status` displays the active model and concrete Model ID.
 
+Each bare `noya` run creates a durable local session. `noya resume` continues the latest session for the current workspace; an ID prefix resumes a specific session:
+
+```bash
+cargo run
+cargo run -- resume
+cargo run -- resume 019fbd63
+cargo run -- sessions
+cargo run -- sessions --all --json
+cargo run -- session show 019fbd63
+cargo run -- session export 019fbd63 --format markdown
+cargo run -- session export 019fbd63 --format jsonl
+cargo run -- session fork 019fbd63
+cargo run -- session archive 019fbd63
+```
+
+Session data is stored below `NOYA_DATA_DIR` when set, otherwise in the operating system's local data directory under `noya/`. Each session has an append-only `events.jsonl`, derived `meta.json`, a transient streaming checkpoint, and an advisory lock. Session logs may contain source code, prompts, model reasoning, tool arguments, and command output; protect them as sensitive local data. API keys are never written to session files.
+
 To use another OpenAI-compatible endpoint, override the configuration explicitly:
 
 ```bash
@@ -102,13 +120,21 @@ Command-line overrides take precedence over model defaults and saved credentials
 
 Each tool call has a 120-second timeout by default, and serialized tool results are limited to 32 KiB before entering the model context. Override these limits with `--tool-timeout-seconds` and `--max-tool-output-bytes`.
 
+Noya automatically compacts context at 75% of a known model context window and always preserves at least the four latest completed turns. Set `NOYA_AUTO_COMPACT=false` to disable automatic compaction; `/compact` remains available.
+
 TUI commands:
 
 ```text
 /help       Show help
+/new        Create and switch to a new session
+/sessions   List sessions for the current workspace
+/resume ID  Switch to a session matching an ID prefix
+/rename T   Rename the active session
+/retry      Retry the latest failed, cancelled, or interrupted input
+/compact    Summarize older context while retaining the full transcript
 /clear      Clear the current display history (native terminal scrollback remains)
-/reset      Reset the session context
-/status     Show workspace, model, and runtime state
+/reset      Start a new durable context epoch without deleting history
+/status     Show session, workspace, model, context, and runtime state
 /cancel     Cancel the active turn
 /quit       Exit
 ```
@@ -128,13 +154,12 @@ run_command  Run a non-interactive shell command in the workspace
 
 ## Current Scope
 
-Included: runtime turn loop, tool-loop guard, workspace-first prompt, LLM model adapter, and event streaming.
+Included: runtime turn loop, tool-loop guard, workspace-first prompt, LLM model adapter, event streaming, durable local sessions, crash recovery, resume/export/archive/fork, reset, retry, and context compaction.
 
-Not included: business domain models, domain plugins, business persistence, multi-tenant runtime management, or domain-specific checkpoint types.
+Not included: cloud synchronization, multi-user session sharing, multiple writers for one session, exactly-once recovery of tool side effects, transport-event replay, or automatic secret redaction.
 
 Suggested next steps:
 
-1. Add a sandbox adapter for `run_command` and optional approval policies for future high-risk tools.
-2. Extract session, history, and compaction behind a standalone `SessionStore` seam.
-3. Add an HTTP/SSE host while keeping the TUI as a transport adapter.
-4. Add pause, resume, and replay while keeping the core runtime domain-independent.
+1. Add a sandbox adapter for `run_command` and optional policies for future high-risk tools.
+2. Add an HTTP/SSE host while keeping durable session replay separate from transport replay.
+3. Add opt-in secret redaction and remote backup adapters without changing the local JSONL source of truth.

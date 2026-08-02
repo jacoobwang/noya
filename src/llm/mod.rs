@@ -51,6 +51,10 @@ impl LlmClient {
         self
     }
 
+    pub fn model_id(&self) -> &str {
+        &self.model
+    }
+
     pub async fn complete(
         &self,
         messages: Vec<ChatMessage>,

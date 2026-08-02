@@ -73,6 +73,14 @@ impl Model {
         !matches!(self, Self::Kimi)
     }
 
+    pub const fn context_window(self) -> Option<usize> {
+        match self {
+            Self::OpenAi | Self::DeepSeek => Some(128_000),
+            Self::Qwen => Some(1_000_000),
+            Self::Kimi => Some(256_000),
+        }
+    }
+
     pub const fn supported() -> &'static [&'static str] {
         &["openai", "deepseek", "qwen", "kimi"]
     }

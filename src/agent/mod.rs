@@ -9,11 +9,19 @@ pub use event::AgentEvent;
 
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 use uuid::Uuid;
 
 use crate::{
     llm::{ChatMessage, LlmClient, LlmEvent},
+    model::Model,
+    session::{
+        AssistantRecord, CompactionRecord, RunId, RuntimeSnapshot, Session, SessionSummary,
+        ToolCallRecord, ToolResultRecord, Transcript, TurnFailure, TurnId,
+    },
     tools::ToolRegistry,
 };
 
@@ -33,11 +41,32 @@ pub struct Agent {
     config: AgentConfig,
     llm: LlmClient,
     tools: ToolRegistry,
-    messages: Vec<ChatMessage>,
+    session: Session,
+    system_prompt: String,
+    run_id: RunId,
 }
 
 impl Agent {
     pub fn new(config: AgentConfig, llm: LlmClient) -> Result<Self> {
+        let session = Session::ephemeral(
+            config.workspace.clone(),
+            "custom".to_string(),
+            llm.model_id().to_string(),
+        )?;
+        Self::with_session(config, llm, session)
+    }
+
+    pub fn with_session(config: AgentConfig, llm: LlmClient, session: Session) -> Result<Self> {
+        let model = session.summary().model;
+        Self::with_session_for_model(config, llm, session, model)
+    }
+
+    pub fn with_session_for_model(
+        mut config: AgentConfig,
+        llm: LlmClient,
+        mut session: Session,
+        model: impl Into<String>,
+    ) -> Result<Self> {
         ensure!(
             !config.tool_timeout.is_zero(),
             "tool timeout must be greater than zero"
@@ -46,19 +75,169 @@ impl Agent {
             config.max_tool_output_bytes >= 256,
             "max tool output must be at least 256 bytes"
         );
+        config.workspace = config
+            .workspace
+            .canonicalize()
+            .with_context(|| format!("canonicalize workspace {}", config.workspace.display()))?;
+        ensure!(
+            session.summary().workspace == config.workspace,
+            "session workspace does not match agent workspace"
+        );
+        let model = model.into();
+        session.change_model(model.clone(), llm.model_id().to_string())?;
         let system = prompt::build(&config.workspace)?;
+        let tools = ToolRegistry::coding_defaults(config.workspace.clone());
+        let run_id = session.start_runtime(RuntimeSnapshot {
+            noya_version: env!("CARGO_PKG_VERSION").to_string(),
+            workspace: config.workspace.clone(),
+            model,
+            model_id: llm.model_id().to_string(),
+            system_prompt: system.clone(),
+            tool_names: tools
+                .definitions()
+                .into_iter()
+                .map(|definition| definition.function.name)
+                .collect(),
+            max_tool_loops: config.max_tool_loops,
+            tool_timeout_ms: config.tool_timeout.as_millis().min(u64::MAX as u128) as u64,
+            max_tool_output_bytes: config.max_tool_output_bytes,
+            temperature: Some(config.temperature),
+        })?;
         Ok(Self {
-            tools: ToolRegistry::coding_defaults(config.workspace.clone()),
-            messages: vec![ChatMessage {
-                role: "system".into(),
-                content: system,
-                reasoning_content: None,
-                tool_call_id: None,
-                tool_calls: None,
-            }],
+            tools,
             config,
             llm,
+            session,
+            system_prompt: system,
+            run_id,
         })
+    }
+
+    pub fn session_summary(&self) -> SessionSummary {
+        self.session.summary()
+    }
+
+    pub fn transcript(&self) -> Transcript {
+        self.session.transcript()
+    }
+
+    pub fn context_token_estimate(&self) -> usize {
+        self.session.context().estimated_tokens
+    }
+
+    pub fn session_log_path(&self) -> Option<PathBuf> {
+        self.session.log_path()
+    }
+
+    pub fn rename_session(&mut self, title: impl Into<String>) -> Result<()> {
+        self.session.rename(title)
+    }
+
+    pub fn replace_session(&mut self, mut session: Session) -> Result<()> {
+        ensure!(
+            session.summary().workspace == self.config.workspace,
+            "session workspace does not match agent workspace"
+        );
+        let model = self.session.summary().model;
+        session.change_model(model.clone(), self.llm.model_id().to_string())?;
+        let run_id = session.start_runtime(RuntimeSnapshot {
+            noya_version: env!("CARGO_PKG_VERSION").to_string(),
+            workspace: self.config.workspace.clone(),
+            model,
+            model_id: self.llm.model_id().to_string(),
+            system_prompt: self.system_prompt.clone(),
+            tool_names: self
+                .tools
+                .definitions()
+                .into_iter()
+                .map(|definition| definition.function.name)
+                .collect(),
+            max_tool_loops: self.config.max_tool_loops,
+            tool_timeout_ms: self.config.tool_timeout.as_millis().min(u64::MAX as u128) as u64,
+            max_tool_output_bytes: self.config.max_tool_output_bytes,
+            temperature: Some(self.config.temperature),
+        })?;
+        self.session = session;
+        self.run_id = run_id;
+        Ok(())
+    }
+
+    pub fn retry_input(&self) -> Option<String> {
+        self.session.retry_input()
+    }
+
+    pub async fn compact(&mut self) -> Result<bool> {
+        let Some(plan) = self.session.compaction_plan() else {
+            return Ok(false);
+        };
+        let response = self
+            .llm
+            .complete(
+                vec![
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: "Summarize earlier coding-agent context for future continuation. Preserve decisions, changed files, commands, results, unresolved work, constraints, and exact identifiers. Do not invent facts.".to_string(),
+                        reasoning_content: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                    ChatMessage {
+                        role: "user".to_string(),
+                        content: plan.source,
+                        reasoning_content: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                ],
+                Vec::new(),
+                self.config.temperature,
+            )
+            .await
+            .context("generate session compaction summary")?;
+        let summary = response
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|choice| choice.message.content)
+            .filter(|content| !content.trim().is_empty())
+            .context("compaction model returned no summary")?;
+        self.session.apply_compaction(CompactionRecord {
+            summary,
+            through_seq: plan.through_seq,
+            through_turn_id: plan.through_turn_id,
+            keep_from_turn_id: plan.keep_from_turn_id,
+            source_token_estimate: plan.source_token_estimate,
+            summary_model: self.llm.model_id().to_string(),
+        })?;
+        Ok(true)
+    }
+
+    pub async fn auto_compact_if_needed(&mut self) -> Result<bool> {
+        let enabled = std::env::var("NOYA_AUTO_COMPACT")
+            .map(|value| {
+                !matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "0" | "false" | "off"
+                )
+            })
+            .unwrap_or(true);
+        if !enabled {
+            return Ok(false);
+        }
+        let Some(context_window) = self
+            .session
+            .summary()
+            .model
+            .parse::<Model>()
+            .ok()
+            .and_then(Model::context_window)
+        else {
+            return Ok(false);
+        };
+        if !self.session.should_auto_compact(context_window) {
+            return Ok(false);
+        }
+        self.compact().await
     }
 
     pub async fn turn<F>(&mut self, input: impl Into<String>, mut emit: F) -> Result<()>
@@ -78,58 +257,120 @@ impl Agent {
     where
         F: FnMut(AgentEvent),
     {
-        emit(AgentEvent::TurnStarted);
-        self.messages.push(ChatMessage {
-            role: "user".into(),
-            content: input.into(),
-            reasoning_content: None,
-            tool_call_id: None,
-            tool_calls: None,
-        });
+        let turn_id = self.session.begin_turn(input.into())?;
+        emit(AgentEvent::TurnStarted { turn_id });
+        let result = self.run_turn(turn_id, &mut emit, &control).await;
+        match result {
+            Ok(()) => {
+                self.session.finish_turn(&turn_id)?;
+                emit(AgentEvent::TurnCompleted { turn_id });
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                if control.is_cancelled() {
+                    self.session
+                        .cancel_turn(&turn_id, message.clone())
+                        .context("persist cancelled turn")?;
+                } else {
+                    self.session
+                        .fail_turn(
+                            &turn_id,
+                            TurnFailure {
+                                message: message.clone(),
+                                recoverable: true,
+                            },
+                        )
+                        .context("persist failed turn")?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn run_turn<F>(
+        &mut self,
+        turn_id: TurnId,
+        emit: &mut F,
+        control: &TurnControl,
+    ) -> Result<()>
+    where
+        F: FnMut(AgentEvent),
+    {
         let mut tool_loops = 0;
         loop {
             let force_final_response = tool_loops >= self.config.max_tool_loops;
-            let mut request_messages = self.messages.clone();
+            let mut request_messages = vec![ChatMessage {
+                role: "system".into(),
+                content: self.system_prompt.clone(),
+                reasoning_content: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }];
+            request_messages.extend(self.session.context().messages);
             let tool_definitions = if force_final_response {
-                if let Some(system) = request_messages
-                    .iter_mut()
-                    .find(|message| message.role == "system")
-                {
-                    system.content.push_str("\n\n");
-                    system.content.push_str(FINAL_RESPONSE_INSTRUCTION);
-                } else {
-                    request_messages.insert(
-                        0,
-                        ChatMessage {
-                            role: "system".into(),
-                            content: FINAL_RESPONSE_INSTRUCTION.into(),
-                            reasoning_content: None,
-                            tool_call_id: None,
-                            tool_calls: None,
-                        },
-                    );
-                }
+                request_messages[0].content.push_str("\n\n");
+                request_messages[0]
+                    .content
+                    .push_str(FINAL_RESPONSE_INSTRUCTION);
                 Vec::new()
             } else {
                 self.tools.definitions()
             };
+            let message_id = Uuid::new_v4();
+            let mut streamed_content = String::new();
+            let mut checkpoint_warning_emitted = false;
+            let run_id = self.run_id;
+            let session = &mut self.session;
             let response = tokio::select! {
                 response = self.llm.complete_stream(
                     request_messages,
                     tool_definitions,
                     self.config.temperature,
                     |event| match event {
-                        LlmEvent::TextDelta(chunk) => emit(AgentEvent::TextDelta {
-                            chunk,
-                            is_final: false,
-                        }),
+                        LlmEvent::TextDelta(chunk) => {
+                            streamed_content.push_str(&chunk);
+                            emit(AgentEvent::TextDelta {
+                                turn_id,
+                                message_id,
+                                chunk,
+                                is_final: false,
+                            });
+                            if let Err(error) = session.checkpoint_draft(
+                                run_id,
+                                turn_id,
+                                message_id,
+                                &streamed_content,
+                                false,
+                            ) && !checkpoint_warning_emitted {
+                                checkpoint_warning_emitted = true;
+                                emit(AgentEvent::Error {
+                                    turn_id: Some(turn_id),
+                                    message: format!("crash recovery checkpoint unavailable: {error}"),
+                                    recoverable: true,
+                                });
+                            }
+                        }
                     },
                 ) => response?,
                 _ = control.cancellation.cancelled() => anyhow::bail!("turn cancelled"),
             };
+            if !streamed_content.is_empty()
+                && let Err(error) =
+                    session.checkpoint_draft(run_id, turn_id, message_id, &streamed_content, true)
+                && !checkpoint_warning_emitted
+            {
+                emit(AgentEvent::Error {
+                    turn_id: Some(turn_id),
+                    message: format!("crash recovery checkpoint unavailable: {error}"),
+                    recoverable: true,
+                });
+            }
             if force_final_response && !response.tool_calls.is_empty() {
                 let content = if response.content.trim().is_empty() {
                     emit(AgentEvent::TextDelta {
+                        turn_id,
+                        message_id,
                         chunk: TOOL_LIMIT_FALLBACK.into(),
                         is_final: false,
                     });
@@ -137,43 +378,37 @@ impl Agent {
                 } else {
                     response.content
                 };
+                self.session.record_assistant(AssistantRecord {
+                    message_id,
+                    content,
+                    reasoning_content: response.reasoning_content,
+                    tool_calls: Vec::new(),
+                })?;
                 emit(AgentEvent::TextDelta {
+                    turn_id,
+                    message_id,
                     chunk: String::new(),
                     is_final: true,
                 });
-                self.messages.push(ChatMessage {
-                    role: "assistant".into(),
-                    content,
-                    reasoning_content: response.reasoning_content,
-                    tool_call_id: None,
-                    tool_calls: None,
-                });
-                emit(AgentEvent::TurnCompleted);
                 return Ok(());
             }
+            let has_tool_calls = !response.tool_calls.is_empty();
+            self.session.record_assistant(AssistantRecord {
+                message_id,
+                content: response.content.clone(),
+                reasoning_content: response.reasoning_content,
+                tool_calls: response.tool_calls.clone(),
+            })?;
             emit(AgentEvent::TextDelta {
+                turn_id,
+                message_id,
                 chunk: String::new(),
                 is_final: true,
             });
-            if response.tool_calls.is_empty() {
-                self.messages.push(ChatMessage {
-                    role: "assistant".into(),
-                    content: response.content,
-                    reasoning_content: response.reasoning_content,
-                    tool_call_id: None,
-                    tool_calls: None,
-                });
-                emit(AgentEvent::TurnCompleted);
+            if !has_tool_calls {
                 return Ok(());
             }
             tool_loops += 1;
-            self.messages.push(ChatMessage {
-                role: "assistant".into(),
-                content: response.content,
-                reasoning_content: response.reasoning_content,
-                tool_call_id: None,
-                tool_calls: Some(response.tool_calls.clone()),
-            });
             for call in response.tool_calls {
                 let mut args: Value = serde_json::from_str(&call.function.arguments)
                     .context("decode tool arguments")?;
@@ -189,6 +424,7 @@ impl Agent {
                         arguments: args.clone(),
                     };
                     emit(AgentEvent::ApprovalRequired {
+                        turn_id,
                         request_id: request.request_id.clone(),
                         call_id: request.call_id.clone(),
                         tool_name: request.tool_name.clone(),
@@ -200,28 +436,41 @@ impl Agent {
                         ApprovalDecision::Reject => {
                             let result =
                                 serde_json::json!({"error": "tool execution rejected by user"});
+                            self.session.record_tool_started(ToolCallRecord {
+                                call_id: call.id.clone(),
+                                name: call.function.name.clone(),
+                                arguments: args,
+                            })?;
+                            self.session.record_tool_finished(ToolResultRecord {
+                                call_id: call.id.clone(),
+                                name: call.function.name.clone(),
+                                result: result.clone(),
+                                success: false,
+                                duration_ms: 0,
+                            })?;
                             emit(AgentEvent::ToolFinished {
+                                turn_id,
                                 call_id: call.id.clone(),
                                 name: call.function.name.clone(),
                                 result: result.clone(),
                                 success: false,
                             });
-                            self.messages.push(ChatMessage {
-                                role: "tool".into(),
-                                content: serde_json::to_string(&result)?,
-                                reasoning_content: None,
-                                tool_call_id: Some(call.id),
-                                tool_calls: None,
-                            });
                             continue;
                         }
                     }
                 }
+                self.session.record_tool_started(ToolCallRecord {
+                    call_id: call.id.clone(),
+                    name: call.function.name.clone(),
+                    arguments: args.clone(),
+                })?;
                 emit(AgentEvent::ToolStarted {
+                    turn_id,
                     call_id: call.id.clone(),
                     name: call.function.name.clone(),
                     arguments: args.clone(),
                 });
+                let started = Instant::now();
                 let (result, success) = tokio::select! {
                     result = execute_tool(
                         &self.tools,
@@ -232,32 +481,26 @@ impl Agent {
                     ) => result,
                         _ = control.cancellation.cancelled() => anyhow::bail!("turn cancelled"),
                 };
-                emit(AgentEvent::ToolFinished {
+                self.session.record_tool_finished(ToolResultRecord {
                     call_id: call.id.clone(),
                     name: call.function.name.clone(),
                     result: result.clone(),
                     success,
-                });
-                self.messages.push(ChatMessage {
-                    role: "tool".into(),
-                    content: serde_json::to_string(&result)?,
-                    reasoning_content: None,
-                    tool_call_id: Some(call.id),
-                    tool_calls: None,
+                    duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                })?;
+                emit(AgentEvent::ToolFinished {
+                    turn_id,
+                    call_id: call.id.clone(),
+                    name: call.function.name.clone(),
+                    result: result.clone(),
+                    success,
                 });
             }
         }
     }
 
     pub fn reset(&mut self) -> Result<()> {
-        self.messages = vec![ChatMessage {
-            role: "system".into(),
-            content: prompt::build(&self.config.workspace)?,
-            reasoning_content: None,
-            tool_call_id: None,
-            tool_calls: None,
-        }];
-        Ok(())
+        self.session.reset_context()
     }
 }
 
@@ -316,6 +559,7 @@ fn limit_tool_result(result: Value, max_bytes: usize) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::{CreateSession, SessionManager};
     use axum::{
         Router,
         body::Body,
@@ -480,25 +724,46 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            events,
-            vec![
-                AgentEvent::TurnStarted,
-                AgentEvent::TextDelta {
-                    chunk: "Hel".to_string(),
-                    is_final: false,
-                },
-                AgentEvent::TextDelta {
-                    chunk: "lo".to_string(),
-                    is_final: false,
-                },
-                AgentEvent::TextDelta {
-                    chunk: String::new(),
-                    is_final: true,
-                },
-                AgentEvent::TurnCompleted,
-            ]
-        );
+        assert_eq!(events.len(), 5);
+        let turn_id = match events[0] {
+            AgentEvent::TurnStarted { turn_id } => turn_id,
+            ref event => panic!("unexpected event: {event:?}"),
+        };
+        let message_id = match &events[1] {
+            AgentEvent::TextDelta {
+                turn_id: delta_turn,
+                message_id,
+                chunk,
+                is_final: false,
+            } => {
+                assert_eq!(*delta_turn, turn_id);
+                assert_eq!(chunk, "Hel");
+                *message_id
+            }
+            event => panic!("unexpected event: {event:?}"),
+        };
+        assert!(matches!(
+            &events[2],
+            AgentEvent::TextDelta {
+                turn_id: delta_turn,
+                message_id: delta_message,
+                chunk,
+                is_final: false,
+            } if *delta_turn == turn_id && *delta_message == message_id && chunk == "lo"
+        ));
+        assert!(matches!(
+            &events[3],
+            AgentEvent::TextDelta {
+                turn_id: delta_turn,
+                message_id: delta_message,
+                chunk,
+                is_final: true,
+            } if *delta_turn == turn_id && *delta_message == message_id && chunk.is_empty()
+        ));
+        assert!(matches!(
+            events[4],
+            AgentEvent::TurnCompleted { turn_id: completed } if completed == turn_id
+        ));
     }
 
     #[tokio::test]
@@ -553,6 +818,72 @@ mod tests {
             std::fs::read_to_string(workspace.path().join("note.txt")).unwrap(),
             "hello"
         );
+    }
+
+    #[tokio::test]
+    async fn completed_agent_turn_is_durable_and_reopens_with_tool_context() {
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/chat/completions", post(write_file_stream))
+                    .with_state(counter),
+            )
+            .await
+            .unwrap();
+        });
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let manager = SessionManager::at(data.path());
+        let session = manager
+            .create(CreateSession {
+                workspace: workspace.path().to_path_buf(),
+                model: "test".to_string(),
+                model_id: "test-model".to_string(),
+            })
+            .unwrap();
+        let session_id = *session.id();
+        let llm = LlmClient::with_client(
+            Client::builder().no_proxy().build().unwrap(),
+            format!("http://{address}"),
+            "test-key",
+            "test-model",
+        );
+        let mut agent = Agent::with_session(
+            AgentConfig {
+                workspace: workspace.path().to_path_buf(),
+                max_tool_loops: 4,
+                tool_timeout: Duration::from_secs(120),
+                max_tool_output_bytes: 32_768,
+                temperature: 0.2,
+            },
+            llm,
+            session,
+        )
+        .unwrap();
+
+        agent.turn("write a note", |_| {}).await.unwrap();
+        drop(agent);
+
+        let session_directory = data.path().join("sessions").join(session_id.to_string());
+        for entry in std::fs::read_dir(&session_directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                let content = std::fs::read(&path).unwrap();
+                assert!(!String::from_utf8_lossy(&content).contains("test-key"));
+            }
+        }
+
+        let reopened = manager.open(session_id).unwrap();
+        let context = reopened.context().messages;
+        assert_eq!(context.len(), 4);
+        assert_eq!(context[0].role, "user");
+        assert_eq!(context[1].tool_calls.as_ref().unwrap()[0].id, "write-1");
+        assert_eq!(context[2].tool_call_id.as_deref(), Some("write-1"));
+        assert_eq!(context[3].content, "Written.");
     }
 
     #[tokio::test]
@@ -649,7 +980,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(counter.load(Ordering::SeqCst), 3);
-        assert!(matches!(events.last(), Some(AgentEvent::TurnCompleted)));
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted { .. })
+        ));
     }
 
     #[tokio::test]
@@ -708,7 +1042,10 @@ mod tests {
             AgentEvent::TextDelta { chunk, .. }
                 if chunk.contains("Summarized without more tools")
         )));
-        assert!(matches!(events.last(), Some(AgentEvent::TurnCompleted)));
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted { .. })
+        ));
     }
 
     #[tokio::test]
@@ -788,7 +1125,10 @@ mod tests {
             event,
             AgentEvent::TextDelta { chunk, .. } if chunk == TOOL_LIMIT_FALLBACK
         )));
-        assert!(matches!(events.last(), Some(AgentEvent::TurnCompleted)));
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted { .. })
+        ));
     }
 
     #[test]

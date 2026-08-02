@@ -1,4 +1,7 @@
-use crate::{AgentEvent, ApprovalDecision, ApprovalRequest};
+use crate::{
+    AgentEvent, ApprovalDecision, ApprovalRequest,
+    session::{SessionSummary, Transcript, TranscriptKind},
+};
 use serde_json::Value;
 use std::{collections::VecDeque, path::PathBuf};
 use uuid::Uuid;
@@ -68,7 +71,14 @@ pub enum AppMode {
 pub enum TuiAction {
     None,
     Submit(String),
+    Clear,
     Reset,
+    NewSession,
+    ListSessions,
+    ResumeSession(String),
+    RenameSession(String),
+    Retry,
+    Compact,
     Cancel,
     Approval(ApprovalDecision),
     Quit,
@@ -85,6 +95,9 @@ pub struct App {
     pub pending_approval: Option<ApprovalRequest>,
     pub status_message: Option<String>,
     pub should_quit: bool,
+    pub session: Option<SessionSummary>,
+    pub session_log_path: Option<PathBuf>,
+    pub context_tokens: usize,
 }
 
 impl App {
@@ -100,18 +113,75 @@ impl App {
             pending_approval: None,
             status_message: None,
             should_quit: false,
+            session: None,
+            session_log_path: None,
+            context_tokens: 0,
         }
+    }
+
+    pub fn load_session(
+        &mut self,
+        summary: SessionSummary,
+        transcript: Transcript,
+        log_path: Option<PathBuf>,
+        context_tokens: usize,
+    ) {
+        self.messages.clear();
+        self.streaming_message_id = None;
+        self.session = Some(summary);
+        self.session_log_path = log_path;
+        self.context_tokens = context_tokens;
+        self.agent_state = AgentState::Idle;
+        self.mode = AppMode::Normal;
+        let skipped = transcript.items.len().saturating_sub(200);
+        if skipped > 0 {
+            self.add_message(Message::new(
+                MessageKind::System,
+                format!("{skipped} earlier transcript items are available via session export."),
+            ));
+        }
+        for item in transcript.items.into_iter().skip(skipped) {
+            let kind = match item.kind {
+                TranscriptKind::User => MessageKind::User,
+                TranscriptKind::Agent => MessageKind::Agent,
+                TranscriptKind::Tool => MessageKind::Tool,
+                TranscriptKind::System => MessageKind::System,
+                TranscriptKind::Error => MessageKind::Error,
+            };
+            let mut message = Message::new(kind, item.content);
+            message.id = item.id;
+            message.tool_call_id = item.tool_call_id;
+            self.add_message(message);
+        }
+    }
+
+    pub fn update_session(
+        &mut self,
+        summary: SessionSummary,
+        log_path: Option<PathBuf>,
+        context_tokens: usize,
+    ) {
+        self.session = Some(summary);
+        self.session_log_path = log_path;
+        self.context_tokens = context_tokens;
     }
 
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
-            AgentEvent::TurnStarted => {
+            AgentEvent::TurnStarted { .. } => {
                 self.agent_state = AgentState::Thinking;
                 self.status_message = None;
             }
-            AgentEvent::TextDelta { chunk, is_final } => {
-                if self.streaming_message_id.is_none() && !chunk.is_empty() {
-                    let message = Message::streaming(MessageKind::Agent);
+            AgentEvent::TextDelta {
+                message_id,
+                chunk,
+                is_final,
+                ..
+            } => {
+                if self.streaming_message_id != Some(message_id) && !chunk.is_empty() {
+                    self.finish_streaming_message();
+                    let mut message = Message::streaming(MessageKind::Agent);
+                    message.id = message_id;
                     self.streaming_message_id = Some(message.id);
                     self.add_message(message);
                 }
@@ -131,6 +201,7 @@ impl App {
                 call_id,
                 name,
                 arguments,
+                ..
             } => {
                 let mut message = Message::streaming(MessageKind::Tool);
                 message.tool_call_id = Some(call_id);
@@ -143,6 +214,7 @@ impl App {
                 name,
                 result,
                 success,
+                ..
             } => {
                 let marker = if success { "completed" } else { "failed" };
                 let content = format!("{name} {marker}: {}", compact_json(&result));
@@ -166,6 +238,7 @@ impl App {
                 call_id,
                 tool_name,
                 arguments,
+                ..
             } => {
                 self.pending_approval = Some(ApprovalRequest {
                     request_id,
@@ -183,17 +256,17 @@ impl App {
                     ),
                 ));
             }
-            AgentEvent::TurnCompleted => {
+            AgentEvent::TurnCompleted { .. } => {
                 self.finish_streaming_message();
                 self.agent_state = AgentState::Idle;
                 self.mode = AppMode::Normal;
                 self.pending_approval = None;
             }
             AgentEvent::Error {
+                turn_id,
                 message,
                 recoverable,
             } => {
-                self.finish_streaming_message();
                 let label = if recoverable {
                     "Recoverable error"
                 } else {
@@ -203,9 +276,12 @@ impl App {
                     MessageKind::Error,
                     format!("{label}: {message}"),
                 ));
-                self.agent_state = AgentState::Error;
-                self.mode = AppMode::Normal;
-                self.pending_approval = None;
+                if turn_id.is_none() {
+                    self.finish_streaming_message();
+                    self.agent_state = AgentState::Error;
+                    self.mode = AppMode::Normal;
+                    self.pending_approval = None;
+                }
             }
         }
     }
@@ -225,34 +301,62 @@ impl App {
             "/help" => {
                 self.add_message(Message::new(
                     MessageKind::System,
-                    "Commands: /help /clear /reset /status /cancel /quit",
+                    "Commands: /help /new /sessions /resume <id> /rename <title> /retry /compact /clear /reset /status /cancel /quit",
                 ));
                 TuiAction::None
             }
             "/clear" => {
                 self.messages.clear();
                 self.streaming_message_id = None;
-                TuiAction::None
+                TuiAction::Clear
             }
-            "/reset" if self.agent_state == AgentState::Idle => {
-                self.messages.clear();
-                self.streaming_message_id = None;
-                self.agent_state = AgentState::Idle;
-                self.add_message(Message::new(MessageKind::System, "Session reset."));
-                TuiAction::Reset
-            }
+            "/reset" if self.agent_state == AgentState::Idle => TuiAction::Reset,
             "/reset" => {
                 self.status_message = Some("Agent is busy; cancel before resetting.".to_string());
                 TuiAction::None
             }
+            "/new" if self.agent_state == AgentState::Idle => {
+                self.agent_state = AgentState::Thinking;
+                TuiAction::NewSession
+            }
+            "/new" => {
+                self.status_message =
+                    Some("Agent is busy; cancel before switching sessions.".to_string());
+                TuiAction::None
+            }
+            "/sessions" => TuiAction::ListSessions,
+            "/retry" if self.agent_state == AgentState::Idle => {
+                self.agent_state = AgentState::Thinking;
+                TuiAction::Retry
+            }
+            "/retry" => {
+                self.status_message = Some("Agent is busy; wait or use /cancel.".to_string());
+                TuiAction::None
+            }
+            "/compact" if self.agent_state == AgentState::Idle => {
+                self.agent_state = AgentState::Thinking;
+                TuiAction::Compact
+            }
+            "/compact" => {
+                self.status_message = Some("Agent is busy; cancel before compacting.".to_string());
+                TuiAction::None
+            }
             "/status" => {
+                let session = self.session.as_ref();
                 self.add_message(Message::new(
                     MessageKind::System,
                     format!(
-                        "Workspace: {}\nModel: {}\nModel ID: {}\nState: {:?}",
+                        "Session: {}\nTitle: {}\nLog: {}\nWorkspace: {}\nModel: {}\nModel ID: {}\nCompleted turns: {}\nContext epoch: {}\nEstimated context tokens: {}\nCompaction cutoff: {}\nState: {:?}",
+                        session.map(|value| value.session_id.to_string()).unwrap_or_else(|| "ephemeral".to_string()),
+                        session.map(|value| value.title.as_str()).unwrap_or("New session"),
+                        self.session_log_path.as_ref().map_or_else(|| "ephemeral".to_string(), |path| path.display().to_string()),
                         self.info.workspace.display(),
                         self.info.model,
                         self.info.model_id,
+                        session.map_or(0, |value| value.completed_turns),
+                        session.map_or(0, |value| value.context_epoch),
+                        self.context_tokens,
+                        session.and_then(|value| value.compaction_through_seq).map_or_else(|| "none".to_string(), |seq| seq.to_string()),
                         self.agent_state
                     ),
                 ));
@@ -277,6 +381,19 @@ impl App {
                         TuiAction::None
                     }
                 }
+            }
+            _ if input.starts_with("/resume ") && self.agent_state == AgentState::Idle => {
+                let prefix = input[8..].trim();
+                if prefix.is_empty() {
+                    self.status_message = Some("Usage: /resume <session-id-prefix>".to_string());
+                    TuiAction::None
+                } else {
+                    self.agent_state = AgentState::Thinking;
+                    TuiAction::ResumeSession(prefix.to_string())
+                }
+            }
+            _ if input.starts_with("/rename ") && self.agent_state == AgentState::Idle => {
+                TuiAction::RenameSession(input[8..].trim().to_string())
             }
             _ if input.starts_with('/') => {
                 self.status_message = Some(format!("Unknown command: {input}"));
@@ -337,8 +454,22 @@ fn compact_json(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AgentEvent;
+    use crate::{AgentEvent, session::TurnId};
     use std::path::PathBuf;
+
+    fn text_delta(
+        turn_id: TurnId,
+        message_id: Uuid,
+        chunk: impl Into<String>,
+        is_final: bool,
+    ) -> AgentEvent {
+        AgentEvent::TextDelta {
+            turn_id,
+            message_id,
+            chunk: chunk.into(),
+            is_final,
+        }
+    }
 
     #[test]
     fn text_deltas_update_one_streaming_message() {
@@ -348,25 +479,18 @@ mod tests {
             model_id: "test-model".to_string(),
         });
 
-        app.handle_agent_event(AgentEvent::TurnStarted);
-        app.handle_agent_event(AgentEvent::TextDelta {
-            chunk: "Hel".to_string(),
-            is_final: false,
-        });
-        app.handle_agent_event(AgentEvent::TextDelta {
-            chunk: "lo".to_string(),
-            is_final: false,
-        });
+        let turn_id = TurnId::new();
+        let message_id = Uuid::new_v4();
+        app.handle_agent_event(AgentEvent::TurnStarted { turn_id });
+        app.handle_agent_event(text_delta(turn_id, message_id, "Hel", false));
+        app.handle_agent_event(text_delta(turn_id, message_id, "lo", false));
 
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].content, "Hello");
         assert!(app.messages[0].is_streaming);
         assert_eq!(app.agent_state, AgentState::Generating);
 
-        app.handle_agent_event(AgentEvent::TextDelta {
-            chunk: String::new(),
-            is_final: true,
-        });
+        app.handle_agent_event(text_delta(turn_id, message_id, "", true));
 
         assert!(!app.messages[0].is_streaming);
         assert_eq!(app.streaming_message_id, None);
@@ -383,18 +507,22 @@ mod tests {
     #[test]
     fn tool_completion_updates_matching_call_id() {
         let mut app = app();
+        let turn_id = TurnId::new();
         app.handle_agent_event(AgentEvent::ToolStarted {
+            turn_id,
             call_id: "first".to_string(),
             name: "read_file".to_string(),
             arguments: serde_json::json!({"path":"a"}),
         });
         app.handle_agent_event(AgentEvent::ToolStarted {
+            turn_id,
             call_id: "second".to_string(),
             name: "read_file".to_string(),
             arguments: serde_json::json!({"path":"b"}),
         });
 
         app.handle_agent_event(AgentEvent::ToolFinished {
+            turn_id,
             call_id: "first".to_string(),
             name: "read_file".to_string(),
             result: serde_json::json!({"content":"A"}),
@@ -462,21 +590,59 @@ mod tests {
     #[test]
     fn interrupted_stream_keeps_partial_text_and_returns_to_idle() {
         let mut app = app();
-        app.handle_agent_event(AgentEvent::TurnStarted);
-        app.handle_agent_event(AgentEvent::TextDelta {
-            chunk: "partial".to_string(),
-            is_final: false,
-        });
+        let turn_id = TurnId::new();
+        let message_id = Uuid::new_v4();
+        app.handle_agent_event(AgentEvent::TurnStarted { turn_id });
+        app.handle_agent_event(text_delta(turn_id, message_id, "partial", false));
 
         app.handle_agent_event(AgentEvent::Error {
+            turn_id: None,
             message: "connection closed".to_string(),
             recoverable: true,
         });
-        app.handle_agent_event(AgentEvent::TurnCompleted);
+        app.handle_agent_event(AgentEvent::TurnCompleted { turn_id });
 
         assert_eq!(app.messages[0].content, "partial");
         assert!(!app.messages[0].is_streaming);
         assert_eq!(app.agent_state, AgentState::Idle);
         assert_eq!(app.messages[1].kind, MessageKind::Error);
+    }
+
+    #[test]
+    fn session_commands_map_to_lifecycle_actions() {
+        let mut app = app();
+
+        assert_eq!(
+            app.handle_submission("/new".to_string()),
+            TuiAction::NewSession
+        );
+        app.agent_state = AgentState::Idle;
+        assert_eq!(
+            app.handle_submission("/sessions".to_string()),
+            TuiAction::ListSessions
+        );
+        assert_eq!(
+            app.handle_submission("/resume 019fbd63".to_string()),
+            TuiAction::ResumeSession("019fbd63".to_string())
+        );
+        app.agent_state = AgentState::Idle;
+        assert_eq!(
+            app.handle_submission("/rename Durable work".to_string()),
+            TuiAction::RenameSession("Durable work".to_string())
+        );
+        assert_eq!(
+            app.handle_submission("/retry".to_string()),
+            TuiAction::Retry
+        );
+        app.agent_state = AgentState::Idle;
+        assert_eq!(
+            app.handle_submission("/compact".to_string()),
+            TuiAction::Compact
+        );
+        app.agent_state = AgentState::Idle;
+        assert_eq!(
+            app.handle_submission("/clear".to_string()),
+            TuiAction::Clear
+        );
     }
 }

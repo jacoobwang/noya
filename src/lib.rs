@@ -7,6 +7,7 @@
 pub mod agent;
 pub mod llm;
 pub mod model;
+pub mod session;
 pub mod tools;
 pub mod tui;
 
