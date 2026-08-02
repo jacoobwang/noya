@@ -1,5 +1,5 @@
 use crate::tui::{
-    app::{AgentState, App, Message, MessageKind},
+    app::{AgentState, App, AppInfo, Message, MessageKind},
     markdown,
 };
 use ratatui::{
@@ -17,6 +17,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub const VIEWPORT_HEIGHT: u16 = 7;
 const INPUT_PROMPT: &str = "> ";
+const WIDE_WELCOME_MIN_WIDTH: usize = 68;
+const NOYA_LOGO: [&str; 5] = [
+    "█   █  ███  █   █  ███",
+    "██  █ █   █  █ █  █   █",
+    "█ █ █ █   █   █   █████",
+    "█  ██ █   █   █   █   █",
+    "█   █  ███    █   █   █",
+];
 
 #[derive(Debug, Clone, Copy)]
 pub struct StreamView {
@@ -35,6 +43,116 @@ pub fn draw(frame: &mut Frame, app: &App, stream_view: Option<StreamView>) {
     render_stream(frame, stream_area, app, stream_view);
     render_status(frame, status_area, app);
     render_input(frame, input_area, app);
+}
+
+pub fn welcome_lines(info: &AppInfo, width: usize) -> Vec<Line<'static>> {
+    let version = env!("CARGO_PKG_VERSION");
+    let model = display_model_name(&info.model);
+    let workspace = display_workspace(&info.workspace);
+    let metadata = welcome_metadata(version, model, &info.model_id, workspace);
+    let logo_style = Style::default()
+        .fg(Color::Blue)
+        .add_modifier(Modifier::BOLD);
+
+    if width < WIDE_WELCOME_MIN_WIDTH {
+        let mut lines = NOYA_LOGO
+            .iter()
+            .map(|logo| Line::from(Span::styled(format!("  {logo}"), logo_style)))
+            .collect::<Vec<_>>();
+        lines.push(Line::default());
+        lines.extend(metadata.into_iter().map(Line::from));
+        lines.push(Line::default());
+        lines.push(welcome_prompt());
+        lines.push(Line::default());
+        return lines;
+    }
+
+    let mut lines = Vec::with_capacity(NOYA_LOGO.len() + 3);
+    for (index, logo) in NOYA_LOGO.iter().enumerate() {
+        let mut spans = vec![Span::styled(format!("  {logo}   "), logo_style)];
+        if let Some(detail) = metadata.get(index) {
+            spans.extend(detail.iter().cloned());
+        }
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::default());
+    lines.push(welcome_prompt());
+    lines.push(Line::default());
+    lines
+}
+
+fn welcome_metadata(
+    version: &str,
+    model: String,
+    model_id: &str,
+    workspace: String,
+) -> [Vec<Span<'static>>; 3] {
+    [
+        vec![
+            Span::styled(
+                "Noya",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" v{version}"), Style::default().fg(Color::DarkGray)),
+        ],
+        vec![
+            Span::styled(
+                model,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" · {model_id}"),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ],
+        vec![Span::styled(
+            workspace,
+            Style::default().fg(Color::DarkGray),
+        )],
+    ]
+}
+
+fn welcome_prompt() -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            "Welcome to Noya.",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " Type a request or /help.",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ])
+}
+
+fn display_model_name(model: &str) -> String {
+    match model {
+        "openai" => "OpenAI".to_string(),
+        "deepseek" => "DeepSeek".to_string(),
+        "qwen" => "Qwen".to_string(),
+        "kimi" => "Kimi".to_string(),
+        value => value.to_string(),
+    }
+}
+
+fn display_workspace(workspace: &std::path::Path) -> String {
+    let Some(home) = dirs::home_dir() else {
+        return workspace.display().to_string();
+    };
+    let Ok(relative) = workspace.strip_prefix(&home) else {
+        return workspace.display().to_string();
+    };
+    if relative.as_os_str().is_empty() {
+        "~".to_string()
+    } else {
+        format!("~/{}", relative.display())
+    }
 }
 
 pub fn message_lines(message: &Message, width: usize) -> Vec<Line<'static>> {
@@ -311,6 +429,7 @@ mod tests {
     use super::*;
     use crate::tui::app::{Message, MessageKind};
     use ratatui::layout::Alignment;
+    use std::path::PathBuf;
 
     #[test]
     fn conversation_messages_align_to_their_speaker_side() {
@@ -377,5 +496,47 @@ mod tests {
         assert!(lines.iter().flat_map(|line| &line.spans).any(|span| {
             span.content == "cargo test" && span.style.add_modifier.contains(Modifier::BOLD)
         }));
+    }
+
+    #[test]
+    fn wide_welcome_shows_identity_model_and_workspace() {
+        let info = AppInfo {
+            workspace: PathBuf::from("/repo/noya"),
+            model: "deepseek".to_string(),
+            model_id: "deepseek-v4-flash".to_string(),
+        };
+
+        let rendered = welcome_lines(&info, 80)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains(&format!("Noya v{}", env!("CARGO_PKG_VERSION"))));
+        assert!(rendered.contains("DeepSeek · deepseek-v4-flash"));
+        assert!(rendered.contains("/repo/noya"));
+        assert!(rendered.contains("Welcome to Noya."));
+        assert!(rendered.contains("█   █  ███  █   █  ███"));
+        assert!(!rendered.contains("System"));
+    }
+
+    #[test]
+    fn compact_welcome_keeps_runtime_information() {
+        let info = AppInfo {
+            workspace: PathBuf::from("/repo"),
+            model: "qwen".to_string(),
+            model_id: "qwen3-coder-plus".to_string(),
+        };
+
+        let rendered = welcome_lines(&info, 40)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Noya"));
+        assert!(rendered.contains("Qwen · qwen3-coder-plus"));
+        assert!(rendered.contains("/repo"));
+        assert!(rendered.contains("█ █ █ █   █   █   █████"));
     }
 }

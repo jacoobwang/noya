@@ -108,7 +108,7 @@ kimi      kimi-k3             not logged in
 
 凭证保存在系统用户配置目录的 `noya/credentials.json` 中，实际路径会在登录成功后输出；Unix 下目录权限为 `0700`，文件权限为 `0600`。也可以用上表中的环境变量临时提供凭证。
 
-启动后进入 inline TUI。已经发送的用户消息右对齐，Agent 输出左对齐；Agent 回复会边生成、边渲染 Markdown、边写入终端原生 scrollback，不需要等待回答结束才能查看完整输出。支持标题、强调、行内代码、代码块、列表、引用和链接；`/status` 会显示当前 model 和实际 Model ID。
+启动后进入 inline TUI，欢迎区会显示当前 Noya 版本、活动 model、实际 Model ID 和 workspace 目录。已经发送的用户消息右对齐，Agent 输出左对齐；Agent 回复会边生成、边渲染 Markdown、边写入终端原生 scrollback，不需要等待回答结束才能查看完整输出。支持标题、强调、行内代码、代码块、列表、引用和链接；`/status` 会显示当前 model 和实际 Model ID。
 
 裸 `noya` 每次创建一个可持久恢复的本地 session。`noya resume` 恢复当前 workspace 最近的 session，也可以使用 ID 前缀恢复指定 session：
 

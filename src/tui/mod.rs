@@ -139,11 +139,9 @@ async fn run_loop(terminal: &mut NoyaTerminal, agent: Agent, info: AppInfo) -> R
         agent.session_log_path(),
         agent.context_token_estimate(),
     );
-    app.add_message(app::Message::new(
-        app::MessageKind::System,
-        "Noya ready. Type a request or /help.",
-    ));
     let mut ui_runtime = UiRuntime::default();
+    flush_unrendered_messages(terminal, &app, &mut ui_runtime)?;
+    render_welcome(terminal, &app.info)?;
     let mut input_events = event::EventHandler::new(Duration::from_millis(80));
     let mut host = spawn_agent_host(agent, SessionManager::discover()?);
     let mut approval_response: Option<(String, oneshot::Sender<crate::ApprovalDecision>)> = None;
@@ -344,6 +342,16 @@ fn flush_unrendered_messages(
             runtime.rendered_message_ids.insert(message.id);
         }
     }
+    Ok(())
+}
+
+fn render_welcome(terminal: &mut NoyaTerminal, info: &AppInfo) -> Result<()> {
+    let terminal_width = usize::from(terminal.size()?.width.max(1));
+    let lines = ui::welcome_lines(info, terminal_width);
+    let height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    terminal.insert_before(height, move |buffer| {
+        ui::render_transcript_buffer(lines, buffer);
+    })?;
     Ok(())
 }
 
