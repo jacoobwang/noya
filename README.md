@@ -41,7 +41,7 @@ Install the latest binary without Rust or a source checkout:
 curl -fsSL https://raw.githubusercontent.com/jacoobwang/noya/main/scripts/install.sh | sh
 ```
 
-The installer detects macOS/Linux and the CPU architecture, verifies the release against `SHA256SUMS`, and installs `noya` to `~/.local/bin` by default. On macOS, if `rg` is missing and Homebrew is available, it also runs `brew install ripgrep`. It does not install Homebrew automatically.
+Noya currently publishes macOS binaries for Apple Silicon and Intel. The installer detects the CPU architecture, verifies the release against `SHA256SUMS`, and installs `noya` to `~/.local/bin` by default. If `rg` is missing and Homebrew is available, it also runs `brew install ripgrep`. It does not install Homebrew automatically.
 
 Optional overrides:
 

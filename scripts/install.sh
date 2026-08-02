@@ -33,11 +33,8 @@ detect_target() {
         *) die "unsupported CPU architecture: $architecture" ;;
     esac
 
-    case "$os" in
-        Darwin) printf '%s-apple-darwin\n' "$architecture" ;;
-        Linux) printf '%s-unknown-linux-gnu\n' "$architecture" ;;
-        *) die "unsupported operating system: $os" ;;
-    esac
+    [ "$os" = Darwin ] || die "unsupported operating system: $os (Noya currently supports macOS only)"
+    printf '%s-apple-darwin\n' "$architecture"
 }
 
 download() {
@@ -93,22 +90,17 @@ ensure_ripgrep() {
         return
     fi
 
-    if [ "$(uname -s 2>/dev/null || true)" = Darwin ]; then
-        brew_path=$(find_homebrew || true)
-        if [ -n "$brew_path" ]; then
-            say "ripgrep was not found; installing it with Homebrew"
-            if "$brew_path" install ripgrep; then
-                say "ripgrep installed"
-            else
-                warn "Homebrew could not install ripgrep; Noya is installed, but search_text will be unavailable"
-            fi
+    brew_path=$(find_homebrew || true)
+    if [ -n "$brew_path" ]; then
+        say "ripgrep was not found; installing it with Homebrew"
+        if "$brew_path" install ripgrep; then
+            say "ripgrep installed"
         else
-            warn "ripgrep is not installed and Homebrew was not found"
-            warn "install Homebrew from https://brew.sh, then run: brew install ripgrep"
+            warn "Homebrew could not install ripgrep; Noya is installed, but search_text will be unavailable"
         fi
     else
-        warn "ripgrep is not installed; Noya is installed, but search_text will be unavailable"
-        warn "install the ripgrep package with your Linux distribution's package manager"
+        warn "ripgrep is not installed and Homebrew was not found"
+        warn "install Homebrew from https://brew.sh, then run: brew install ripgrep"
     fi
 }
 
