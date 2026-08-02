@@ -54,31 +54,37 @@ NOYA_SKIP_RIPGREP=1 sh scripts/install.sh
 
 ## 运行
 
-首次使用先登录 model。API key 使用隐藏输入，不会显示在终端：
+安装预编译版本后，直接使用 `noya` 可执行命令。首次运行前先登录 model；API key 使用隐藏输入，不会显示在终端：
 
 ```bash
-cargo run -- login deepseek
+noya login deepseek
 # DeepSeek API key:
 
-cargo run -- --workspace /path/to/repo
+cd /path/to/repo
+noya
+
+# 也可以在任意目录为指定仓库启动 Noya：
+noya --workspace /path/to/repo
 ```
 
 `login` 会把该 model 设为当前活动 model；之后启动时不需要再次指定。`--workspace` 也可以省略，默认使用当前目录：
 
 ```bash
-cargo run
+noya
 ```
+
+如果从源码运行，在 Noya 参数前使用 `cargo run --`。例如，`noya login deepseek` 对应 `cargo run -- login deepseek`，裸 `noya` 对应 `cargo run`。
 
 目前支持 `openai`、`deepseek`、`qwen` 和 `kimi`：
 
 ```bash
-cargo run -- login openai
-cargo run -- login deepseek
-cargo run -- login qwen
-cargo run -- login kimi
-cargo run -- logout deepseek
-cargo run -- logout          # 删除当前活动 model 的凭证
-cargo run -- models          # 查看支持的 model 和登录状态
+noya login openai
+noya login deepseek
+noya login qwen
+noya login kimi
+noya logout deepseek
+noya logout          # 删除当前活动 model 的凭证
+noya models          # 查看支持的 model 和登录状态
 ```
 
 `models` 输出示例：
@@ -107,16 +113,16 @@ kimi      kimi-k3             not logged in
 裸 `noya` 每次创建一个可持久恢复的本地 session。`noya resume` 恢复当前 workspace 最近的 session，也可以使用 ID 前缀恢复指定 session：
 
 ```bash
-cargo run
-cargo run -- resume
-cargo run -- resume 019fbd63
-cargo run -- sessions
-cargo run -- sessions --all --json
-cargo run -- session show 019fbd63
-cargo run -- session export 019fbd63 --format markdown
-cargo run -- session export 019fbd63 --format jsonl
-cargo run -- session fork 019fbd63
-cargo run -- session archive 019fbd63
+noya
+noya resume
+noya resume 019fbd63
+noya sessions
+noya sessions --all --json
+noya session show 019fbd63
+noya session export 019fbd63 --format markdown
+noya session export 019fbd63 --format jsonl
+noya session fork 019fbd63
+noya session archive 019fbd63
 ```
 
 设置 `NOYA_DATA_DIR` 时 session 保存在该目录，否则保存在操作系统本地数据目录的 `noya/` 下。每个 session 包含 append-only `events.jsonl`、派生的 `meta.json`、临时流式 checkpoint 和 advisory lock。Session 日志可能包含源码、prompt、模型 reasoning、工具参数和命令输出，应当视为敏感本地数据；API key 不会写入 session 文件。
@@ -124,7 +130,7 @@ cargo run -- session archive 019fbd63
 需要接入其他 OpenAI-compatible endpoint 时，可以显式覆盖配置：
 
 ```bash
-cargo run -- --model qwen \
+noya --model qwen \
   --workspace /path/to/repo \
   --base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
   --model-id qwen3-coder-plus \

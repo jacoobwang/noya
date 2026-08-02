@@ -54,31 +54,37 @@ Published releases must provide `noya-<rust-target>.tar.gz` archives containing 
 
 ## Usage
 
-Sign in to a model before the first run. API keys are entered through a hidden prompt and are not displayed in the terminal:
+After installing the prebuilt release, run the `noya` executable directly. Sign in to a model before the first run; API keys are entered through a hidden prompt and are not displayed in the terminal:
 
 ```bash
-cargo run -- login deepseek
+noya login deepseek
 # DeepSeek API key:
 
-cargo run -- --workspace /path/to/repo
+cd /path/to/repo
+noya
+
+# Or start Noya for a specific repository from any directory:
+noya --workspace /path/to/repo
 ```
 
 `login` makes the selected model active, so it does not need to be specified on subsequent runs. `--workspace` is optional and defaults to the current directory:
 
 ```bash
-cargo run
+noya
 ```
+
+When running from a source checkout, use `cargo run --` before Noya's arguments. For example, `noya login deepseek` becomes `cargo run -- login deepseek`, while a bare `noya` becomes `cargo run`.
 
 Noya currently supports `openai`, `deepseek`, `qwen`, and `kimi`:
 
 ```bash
-cargo run -- login openai
-cargo run -- login deepseek
-cargo run -- login qwen
-cargo run -- login kimi
-cargo run -- logout deepseek
-cargo run -- logout          # Remove credentials for the active model
-cargo run -- models          # Show supported models and login status
+noya login openai
+noya login deepseek
+noya login qwen
+noya login kimi
+noya logout deepseek
+noya logout          # Remove credentials for the active model
+noya models          # Show supported models and login status
 ```
 
 Example `models` output:
@@ -107,16 +113,16 @@ Noya starts in an inline TUI. Sent user messages are right-aligned and Agent out
 Each bare `noya` run creates a durable local session. `noya resume` continues the latest session for the current workspace; an ID prefix resumes a specific session:
 
 ```bash
-cargo run
-cargo run -- resume
-cargo run -- resume 019fbd63
-cargo run -- sessions
-cargo run -- sessions --all --json
-cargo run -- session show 019fbd63
-cargo run -- session export 019fbd63 --format markdown
-cargo run -- session export 019fbd63 --format jsonl
-cargo run -- session fork 019fbd63
-cargo run -- session archive 019fbd63
+noya
+noya resume
+noya resume 019fbd63
+noya sessions
+noya sessions --all --json
+noya session show 019fbd63
+noya session export 019fbd63 --format markdown
+noya session export 019fbd63 --format jsonl
+noya session fork 019fbd63
+noya session archive 019fbd63
 ```
 
 Session data is stored below `NOYA_DATA_DIR` when set, otherwise in `~/.noya/`. Each session has an append-only `events.jsonl`, derived `meta.json`, a transient streaming checkpoint, and an advisory lock. Session logs may contain source code, prompts, model reasoning, tool arguments, and command output; protect them as sensitive local data. API keys are never written to session files.
@@ -124,7 +130,7 @@ Session data is stored below `NOYA_DATA_DIR` when set, otherwise in `~/.noya/`. 
 To use another OpenAI-compatible endpoint, override the configuration explicitly:
 
 ```bash
-cargo run -- --model qwen \
+noya --model qwen \
   --workspace /path/to/repo \
   --base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
   --model-id qwen3-coder-plus \
