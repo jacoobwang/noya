@@ -150,7 +150,10 @@ impl Tool for SearchText {
                 path.to_str().unwrap_or("."),
             ])
             .output()
-            .await?;
+            .await
+            .context(
+                "run ripgrep (rg); install it with `brew install ripgrep` on macOS or your Linux package manager",
+            )?;
         Ok(
             json!({"matches": String::from_utf8_lossy(&output.stdout), "exit_code": output.status.code()}),
         )

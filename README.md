@@ -33,6 +33,25 @@ src/
   tui/      terminal host, state, input events, and rendering
 ```
 
+## Install a prebuilt release
+
+Install the latest binary without Rust or a source checkout:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jacoobwang/noya/main/scripts/install.sh | sh
+```
+
+The installer detects macOS/Linux and the CPU architecture, verifies the release against `SHA256SUMS`, and installs `noya` to `~/.local/bin` by default. On macOS, if `rg` is missing and Homebrew is available, it also runs `brew install ripgrep`. It does not install Homebrew automatically.
+
+Optional overrides:
+
+```bash
+NOYA_VERSION=v0.1.0 NOYA_INSTALL_DIR=/usr/local/bin sh scripts/install.sh
+NOYA_SKIP_RIPGREP=1 sh scripts/install.sh
+```
+
+Published releases must provide `noya-<rust-target>.tar.gz` archives containing a top-level `noya` executable and a matching `SHA256SUMS` file.
+
 ## Usage
 
 Sign in to a model before the first run. API keys are entered through a hidden prompt and are not displayed in the terminal:

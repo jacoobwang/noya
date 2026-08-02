@@ -33,6 +33,25 @@ src/
   tui/      terminal host、状态、输入事件和渲染
 ```
 
+## 安装预编译版本
+
+不安装 Rust、不拉取源码，直接安装最新二进制：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jacoobwang/noya/main/scripts/install.sh | sh
+```
+
+安装脚本会识别 macOS/Linux 和 CPU 架构，使用 `SHA256SUMS` 校验 Release 文件，并默认把 `noya` 安装到 `~/.local/bin`。在 macOS 上，如果没有 `rg` 但存在 Homebrew，脚本会执行 `brew install ripgrep`；脚本不会自动安装 Homebrew。
+
+可选覆盖参数：
+
+```bash
+NOYA_VERSION=v0.1.0 NOYA_INSTALL_DIR=/usr/local/bin sh scripts/install.sh
+NOYA_SKIP_RIPGREP=1 sh scripts/install.sh
+```
+
+发布的 Release 需要提供 `noya-<rust-target>.tar.gz`，压缩包顶层包含 `noya` 可执行文件，同时提供对应的 `SHA256SUMS`。
+
 ## 运行
 
 首次使用先登录 model。API key 使用隐藏输入，不会显示在终端：
