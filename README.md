@@ -1,8 +1,10 @@
 # Noya
 
-Noya 是一个独立的 coding agent 原型，专注于处理代码仓库内的开发任务。它提供轻量的 agent runtime、工具调用和事件流能力，方便接入 CLI、HTTP 服务或 IDE。
+English | [简体中文](README-ZH.md)
 
-## 当前内核
+Noya is a standalone coding-agent prototype focused on development tasks inside code repositories. It provides a lightweight agent runtime, tool calling, and event streaming that can be hosted by a CLI, HTTP service, or IDE integration.
+
+## Architecture
 
 ```text
 CLI / future HTTP host
@@ -16,23 +18,23 @@ CLI / future HTTP host
        LlmClient (OpenAI-compatible)
 ```
 
-`Agent` 是唯一需要被 host 使用的深模块接口：输入一个 user turn，持续发出 `AgentEvent`。LLM 和工具都在 seam 上作为 adapter，后面可以接 `agentd`、WebSocket 或 IDE host。
+`Agent` is the single deep-module interface a host needs to use: submit a user turn and consume the resulting `AgentEvent` stream. The LLM and tools are adapters behind stable seams, allowing future hosts such as `agentd`, WebSocket services, or IDE integrations.
 
-核心目录按职责组织：
+The source tree is organized by responsibility:
 
 ```text
 src/
-  cli/      CLI 参数、login/logout 和 TUI 启动入口
-  agent/    turn loop、事件、取消、审批和 prompt
-  llm/      OpenAI-compatible client、协议 DTO 和 SSE
-  model/    model catalog、运行配置和本地凭证存储
-  tools/    tool registry、文件工具和命令工具
-  tui/      terminal host、状态、输入事件和渲染
+  cli/      CLI arguments, login/logout, and TUI startup
+  agent/    turn loop, events, cancellation, optional approval, and prompt
+  llm/      OpenAI-compatible client, protocol DTOs, and SSE handling
+  model/    model catalog, runtime configuration, and local credentials
+  tools/    tool registry, filesystem tools, and command execution
+  tui/      terminal host, state, input events, and rendering
 ```
 
-## 运行
+## Usage
 
-首次使用先登录 model。API key 使用隐藏输入，不会显示在终端：
+Sign in to a model before the first run. API keys are entered through a hidden prompt and are not displayed in the terminal:
 
 ```bash
 cargo run -- login deepseek
@@ -41,13 +43,13 @@ cargo run -- login deepseek
 cargo run -- --workspace /path/to/repo
 ```
 
-`login` 会把该 model 设为当前活动 model；之后启动时不需要再次指定。`--workspace` 也可以省略，默认使用当前目录：
+`login` makes the selected model active, so it does not need to be specified on subsequent runs. `--workspace` is optional and defaults to the current directory:
 
 ```bash
 cargo run
 ```
 
-目前支持 `openai`、`deepseek`、`qwen` 和 `kimi`：
+Noya currently supports `openai`, `deepseek`, `qwen`, and `kimi`:
 
 ```bash
 cargo run -- login openai
@@ -55,11 +57,11 @@ cargo run -- login deepseek
 cargo run -- login qwen
 cargo run -- login kimi
 cargo run -- logout deepseek
-cargo run -- logout          # 删除当前活动 model 的凭证
-cargo run -- models          # 查看支持的 model 和登录状态
+cargo run -- logout          # Remove credentials for the active model
+cargo run -- models          # Show supported models and login status
 ```
 
-`models` 输出示例：
+Example `models` output:
 
 ```text
 MODEL     MODEL ID            STATUS
@@ -69,20 +71,20 @@ qwen      qwen3-coder-plus    active
 kimi      kimi-k3             not logged in
 ```
 
-各 model 的默认配置：
+Default model configuration:
 
-| Model | 默认 endpoint | 默认 Model ID | API key 环境变量 |
+| Model | Default endpoint | Default Model ID | API key environment variable |
 | --- | --- | --- | --- |
 | `openai` | `https://api.openai.com/v1` | `gpt-4o` | `OPENAI_API_KEY` |
 | `deepseek` | `https://api.deepseek.com` | `deepseek-v4-flash` | `DEEPSEEK_API_KEY` |
 | `qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3-coder-plus` | `DASHSCOPE_API_KEY` |
 | `kimi` | `https://api.moonshot.cn/v1` | `kimi-k3` | `MOONSHOT_API_KEY` |
 
-凭证保存在系统用户配置目录的 `noya/credentials.json` 中，实际路径会在登录成功后输出；Unix 下目录权限为 `0700`，文件权限为 `0600`。也可以用上表中的环境变量临时提供凭证。
+Credentials are stored in `noya/credentials.json` under the current user's system configuration directory. The exact path is printed after a successful login. On Unix, the directory uses mode `0700` and the file uses mode `0600`. The environment variables above can also provide temporary credentials.
 
-启动后进入 inline TUI。已经发送的用户消息右对齐，Agent 输出左对齐；Agent 回复会边生成、边渲染 Markdown、边写入终端原生 scrollback，不需要等待回答结束才能查看完整输出。支持标题、强调、行内代码、代码块、列表、引用和链接；`/status` 会显示当前 model 和实际 Model ID。
+Noya starts in an inline TUI. Sent user messages are right-aligned and Agent output is left-aligned. Agent responses are streamed, rendered as Markdown, and written to native terminal scrollback while generation is still in progress. Supported Markdown includes headings, emphasis, inline code, code blocks, lists, blockquotes, and links. `/status` displays the active model and concrete Model ID.
 
-需要接入其他 OpenAI-compatible endpoint 时，可以显式覆盖配置：
+To use another OpenAI-compatible endpoint, override the configuration explicitly:
 
 ```bash
 cargo run -- --model qwen \
@@ -92,35 +94,35 @@ cargo run -- --model qwen \
   --api-key ...
 ```
 
-命令行覆盖项优先于 model 默认值和已保存凭证。
+Command-line overrides take precedence over model defaults and saved credentials.
 
-`qwen` 默认使用阿里云中国区兼容地址，`kimi` 默认使用中国开放平台地址；其他区域可通过 `--base-url` 覆盖。
+`qwen` defaults to the Alibaba Cloud China-compatible endpoint, while `kimi` defaults to Moonshot's China API. Use `--base-url` for other regions.
 
-`--max-tool-loops` 默认允许 50 轮工具调用。达到上限后仍允许一次最终模型响应；如果该响应继续请求工具，则终止当前 turn，且不会执行超额工具。
+`--max-tool-loops` allows 50 tool-call rounds by default. After the limit is reached, one final model response is still allowed. If that response requests another tool, the current turn stops without executing the extra tool.
 
-常用命令：
+TUI commands:
 
 ```text
-/help       显示帮助
-/clear      清空当前会话的显示记录（终端原生 scrollback 保留）
-/reset      重置会话上下文
-/status     显示 workspace、model 和运行状态
-/cancel     取消当前 turn
-/quit       退出
+/help       Show help
+/clear      Clear the current display history (native terminal scrollback remains)
+/reset      Reset the session context
+/status     Show workspace, model, and runtime state
+/cancel     Cancel the active turn
+/quit       Exit
 ```
 
-`Ctrl+C` 在 Agent 运行时取消当前 turn，空闲时退出；`Ctrl+D` 始终退出。当前 5 个内置 tool 均直接执行，不要求用户确认。`run_command` 会在 workspace 中执行非交互 shell 命令。
+`Ctrl+C` cancels an active turn and exits when idle. `Ctrl+D` always exits. All five built-in tools execute without confirmation. `run_command` executes non-interactive shell commands inside the workspace.
 
-## 当前边界
+## Current Scope
 
-包含：runtime turn loop、tool loop guard、workspace-first prompt、LLM model adapter 和事件流。
+Included: runtime turn loop, tool-loop guard, workspace-first prompt, LLM model adapter, and event streaming.
 
-暂不包含：业务领域模型、领域插件、业务 persistence、多业务实例管理，以及面向特定业务的 checkpoint 类型。
+Not included: business domain models, domain plugins, business persistence, multi-tenant runtime management, or domain-specific checkpoint types.
 
-下一阶段建议按此顺序演进：
+Suggested next steps:
 
-1. 为 `run_command` 增加 sandbox adapter，并为未来的高风险 tool 提供可选 approval policy。
-2. 把 session/history/compaction 抽成独立 `SessionStore` seam。
-3. 增加 diff-aware patch 工具，避免模型整文件覆盖。
-4. 增加 HTTP/SSE host；TUI 只保留 transport adapter。
-5. 增加 pause/resume/replay 能力，并保持核心 runtime 与具体业务领域解耦。
+1. Add a sandbox adapter for `run_command` and optional approval policies for future high-risk tools.
+2. Extract session, history, and compaction behind a standalone `SessionStore` seam.
+3. Add a diff-aware patch tool to avoid replacing entire files.
+4. Add an HTTP/SSE host while keeping the TUI as a transport adapter.
+5. Add pause, resume, and replay while keeping the core runtime domain-independent.
