@@ -46,7 +46,7 @@ Noya currently publishes macOS binaries for Apple Silicon and Intel. The install
 Optional overrides:
 
 ```bash
-NOYA_VERSION=v0.1.0 NOYA_INSTALL_DIR=/usr/local/bin sh scripts/install.sh
+NOYA_VERSION=v0.2.0 NOYA_INSTALL_DIR=/usr/local/bin sh scripts/install.sh
 NOYA_SKIP_RIPGREP=1 sh scripts/install.sh
 ```
 

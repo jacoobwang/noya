@@ -46,7 +46,7 @@ Noya 目前只发布 macOS 版本，同时支持 Apple Silicon 和 Intel。安�
 可选覆盖参数：
 
 ```bash
-NOYA_VERSION=v0.1.0 NOYA_INSTALL_DIR=/usr/local/bin sh scripts/install.sh
+NOYA_VERSION=v0.2.0 NOYA_INSTALL_DIR=/usr/local/bin sh scripts/install.sh
 NOYA_SKIP_RIPGREP=1 sh scripts/install.sh
 ```
 
