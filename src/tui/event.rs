@@ -81,6 +81,25 @@ pub fn handle_key_event(key: KeyEvent, app: &mut App) -> TuiAction {
         };
     }
 
+    if app.mode == crate::tui::app::AppMode::SelectingModel {
+        return match key.code {
+            KeyCode::Up => {
+                app.select_previous_model();
+                TuiAction::None
+            }
+            KeyCode::Down => {
+                app.select_next_model();
+                TuiAction::None
+            }
+            KeyCode::Enter => app.accept_selected_model(),
+            KeyCode::Esc => {
+                app.close_model_menu();
+                TuiAction::None
+            }
+            _ => TuiAction::None,
+        };
+    }
+
     match key.code {
         KeyCode::Enter => app
             .accept_selected_command()
@@ -219,7 +238,7 @@ mod tests {
         assert_eq!(app.command_selection, 1);
         assert_eq!(
             handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app),
-            TuiAction::ListSessions
+            TuiAction::ListModels
         );
         assert!(app.input.is_empty());
     }
@@ -276,5 +295,38 @@ mod tests {
         assert_eq!(app.input, "/status");
         assert!(app.messages.is_empty());
         assert!(app.command_suggestions().is_empty());
+    }
+
+    #[test]
+    fn model_menu_uses_arrows_enter_and_escape() {
+        let mut app = app();
+        app.open_model_menu(vec![
+            crate::tui::app::ModelChoice {
+                model: "deepseek".to_string(),
+                model_id: "deepseek-v4-flash".to_string(),
+                current: true,
+            },
+            crate::tui::app::ModelChoice {
+                model: "qwen".to_string(),
+                model_id: "qwen3-coder-plus".to_string(),
+                current: false,
+            },
+        ]);
+
+        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.model_selection, 1);
+        assert_eq!(
+            handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app),
+            TuiAction::SwitchModel("qwen".to_string())
+        );
+
+        app.open_model_menu(vec![crate::tui::app::ModelChoice {
+            model: "deepseek".to_string(),
+            model_id: "deepseek-v4-flash".to_string(),
+            current: true,
+        }]);
+        handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.mode, crate::tui::app::AppMode::Normal);
+        assert!(app.model_choices.is_empty());
     }
 }

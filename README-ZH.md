@@ -110,6 +110,8 @@ kimi      kimi-k3             not logged in
 
 启动后进入 inline TUI，欢迎区会显示当前 Noya 版本、活动 model、实际 Model ID 和 workspace 目录。输入 `/` 打开命令菜单，使用 ↑/↓ 选择命令，Enter 应用命令，Tab 只补全而不执行，Esc 关闭菜单。已经发送的用户消息右对齐，Agent 输出左对齐；Agent 回复会边生成、边渲染 Markdown、边写入终端原生 scrollback，不需要等待回答结束才能查看完整输出。支持标题、强调、行内代码、代码块、列表、引用和链接；`/status` 会显示当前 model 和实际 Model ID。
 
+使用 `/model` 打开交互式选择器，其中只显示通过 `noya login` 配置过的 model；使用 ↑/↓ 选择、Enter 切换、Esc 取消。仍可使用 `/model <name>` 直接切换，这种方式也支持对应的 API key 环境变量。切换后保留现有对话上下文，并持久化到当前 session；同一 TUI 内的 `/new` 会继承切换后的 model，但不会修改以后重新启动 Noya 时使用的登录默认 model。
+
 裸 `noya` 每次创建一个可持久恢复的本地 session。`noya resume` 恢复当前 workspace 最近的 session，也可以使用 ID 前缀恢复指定 session：
 
 ```bash
@@ -152,6 +154,7 @@ noya --model qwen \
 ```text
 /help       显示帮助
 /new        创建并切换到新 session
+/model      选择已登录 model，或使用 /model <name> 切换
 /sessions   列出当前 workspace 的 session
 /resume ID  使用 ID 前缀切换 session
 /rename T   重命名当前 session

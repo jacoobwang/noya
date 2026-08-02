@@ -110,6 +110,8 @@ Credentials are stored in `noya/credentials.json` under the current user's syste
 
 Noya starts in an inline TUI with a welcome header showing the installed version, active model and Model ID, and workspace directory. Type `/` to open the command menu, use ↑/↓ to select a command, Enter to apply it, Tab to complete it without running, and Esc to close the menu. Sent user messages are right-aligned and Agent output is left-aligned. Agent responses are streamed, rendered as Markdown, and written to native terminal scrollback while generation is still in progress. Supported Markdown includes headings, emphasis, inline code, code blocks, lists, blockquotes, and links. `/status` displays the active model and concrete Model ID.
 
+Use `/model` to open an interactive picker containing only models configured through `noya login`. Select with ↑/↓, switch with Enter, or cancel with Esc. `/model <name>` remains available as a direct shortcut and can also use the model's API key environment variable. Switching keeps the existing conversation context and is persisted with the session. `/new` within the same TUI inherits the switched model, but the login default for future Noya launches is unchanged.
+
 Each bare `noya` run creates a durable local session. `noya resume` continues the latest session for the current workspace; an ID prefix resumes a specific session:
 
 ```bash
@@ -152,6 +154,7 @@ TUI commands:
 ```text
 /help       Show help
 /new        Create and switch to a new session
+/model      Choose a logged-in model, or switch with /model <name>
 /sessions   List sessions for the current workspace
 /resume ID  Switch to a session matching an ID prefix
 /rename T   Rename the active session

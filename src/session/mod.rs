@@ -496,6 +496,10 @@ impl Session {
     }
 
     pub(crate) fn change_model(&mut self, model: String, model_id: String) -> Result<()> {
+        ensure!(
+            !self.projection.has_active_turn(),
+            "cannot change model during an active turn"
+        );
         if self.projection.meta.model == model && self.projection.meta.model_id == model_id {
             return Ok(());
         }

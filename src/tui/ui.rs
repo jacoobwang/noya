@@ -1,5 +1,5 @@
 use crate::tui::{
-    app::{AgentState, App, AppInfo, Message, MessageKind},
+    app::{AgentState, App, AppInfo, AppMode, Message, MessageKind},
     markdown,
 };
 use ratatui::{
@@ -36,17 +36,95 @@ pub struct StreamView {
 
 pub fn draw(frame: &mut Frame, app: &App, stream_view: Option<StreamView>) {
     let command_menu_open = !app.command_suggestions().is_empty();
+    let model_menu_open = app.mode == AppMode::SelectingModel;
+    let menu_open = command_menu_open || model_menu_open;
     let [stream_area, status_area, input_area, command_menu_area] =
-        tui_areas(frame.area(), command_menu_open);
+        tui_areas(frame.area(), menu_open);
 
-    if !command_menu_open {
+    if !menu_open {
         render_stream(frame, stream_area, app, stream_view);
     }
     render_status(frame, status_area, app);
     render_input(frame, input_area, app);
-    if command_menu_open {
+    if model_menu_open {
+        render_model_menu(frame, command_menu_area, app);
+    } else if command_menu_open {
         render_command_menu(frame, command_menu_area, app);
     }
+}
+
+fn render_model_menu(frame: &mut Frame, area: Rect, app: &App) {
+    if area.is_empty() {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(model_menu_lines(app, usize::from(area.height))),
+        area,
+    );
+}
+
+fn model_menu_lines(app: &App, height: usize) -> Vec<Line<'static>> {
+    if app.model_choices.is_empty() || height == 0 {
+        return Vec::new();
+    }
+    let selected = app.model_selection.min(app.model_choices.len() - 1);
+    let visible_count = COMMAND_MENU_MAX_VISIBLE
+        .min(height.saturating_sub(1).max(1))
+        .min(app.model_choices.len());
+    let start = selected
+        .saturating_sub(visible_count - 1)
+        .min(app.model_choices.len() - visible_count);
+    let mut lines = Vec::with_capacity(visible_count + 1);
+    for (index, choice) in app
+        .model_choices
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible_count)
+    {
+        let is_selected = index == selected;
+        let selected_style = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        let normal_style = Style::default().fg(Color::White);
+        lines.push(Line::from(vec![
+            Span::styled(
+                if is_selected { "› " } else { "  " },
+                if is_selected {
+                    selected_style
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+            Span::styled(
+                format!("{:<12}", choice.model),
+                if is_selected {
+                    selected_style
+                } else {
+                    normal_style
+                },
+            ),
+            Span::styled(
+                format!("{:<26}", choice.model_id),
+                if is_selected {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+            Span::styled(
+                if choice.current { "✓ current" } else { "" },
+                Style::default().fg(Color::Green),
+            ),
+        ]));
+    }
+    if lines.len() < height {
+        lines.push(Line::from(Span::styled(
+            "  Logged-in models only · ↑/↓ select · Enter switch · Esc close",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines
 }
 
 fn tui_areas(area: Rect, command_menu_open: bool) -> [Rect; 4] {
@@ -422,7 +500,12 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     let prompt_width = UnicodeWidthStr::width(INPUT_PROMPT);
     let available = usize::from(inner.width).saturating_sub(prompt_width);
     let (visible, cursor_column) = visible_input(&app.input, app.cursor_position, available);
-    let text = if visible.is_empty() {
+    let text = if app.mode == AppMode::SelectingModel {
+        Span::styled(
+            "Select a model with ↑/↓ and Enter.",
+            Style::default().fg(Color::DarkGray),
+        )
+    } else if visible.is_empty() {
         Span::styled(
             "Type a request. /help for commands.",
             Style::default().fg(Color::DarkGray),
@@ -651,7 +734,7 @@ mod tests {
         assert!(rendered.contains("› new"));
         assert!(rendered.contains("Start a new session"));
         assert!(rendered.contains("↑/↓ navigate"));
-        assert!(rendered.contains("(1/12)"));
+        assert!(rendered.contains("(1/13)"));
     }
 
     #[test]
@@ -663,5 +746,37 @@ mod tests {
         assert_eq!(input.height, 2);
         assert_eq!(menu.y, input.bottom());
         assert_eq!(menu.height, COMMAND_MENU_HEIGHT);
+    }
+
+    #[test]
+    fn model_menu_renders_choices_and_current_marker() {
+        let mut app = App::new(AppInfo {
+            workspace: PathBuf::from("/repo"),
+            model: "qwen".to_string(),
+            model_id: "qwen3-coder-plus".to_string(),
+        });
+        app.open_model_menu(vec![
+            crate::tui::app::ModelChoice {
+                model: "deepseek".to_string(),
+                model_id: "deepseek-v4-flash".to_string(),
+                current: false,
+            },
+            crate::tui::app::ModelChoice {
+                model: "qwen".to_string(),
+                model_id: "qwen3-coder-plus".to_string(),
+                current: true,
+            },
+        ]);
+
+        let rendered = model_menu_lines(&app, 6)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("deepseek"));
+        assert!(rendered.contains("› qwen"));
+        assert!(rendered.contains("✓ current"));
+        assert!(rendered.contains("Logged-in models only"));
     }
 }

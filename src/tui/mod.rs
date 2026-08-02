@@ -7,10 +7,11 @@ mod markdown;
 mod ui;
 
 pub use app::AppInfo;
-use app::{App, TuiAction};
+use app::{App, ModelChoice, TuiAction};
 
 use crate::{
-    Agent, AgentEvent, ApprovalPrompt, TurnControl,
+    Agent, AgentEvent, ApprovalPrompt, LlmClient, TurnControl,
+    model::{CredentialStore, Model, ModelOverrides, ModelStatus, RuntimeModelConfig},
     session::{CreateSession, SessionFilter, SessionManager, SessionSummary, Transcript},
 };
 use anyhow::{Context, Result};
@@ -59,6 +60,8 @@ enum AgentCommand {
     Submit(String),
     Reset,
     NewSession,
+    ListModels,
+    SwitchModel(String),
     ListSessions,
     ResumeSession(String),
     RenameSession(String),
@@ -82,8 +85,10 @@ enum HostEvent {
         context_tokens: usize,
     },
     SessionList(Vec<SessionSummary>),
+    ModelChoices(Vec<ModelChoice>),
     RetrySubmitted(String),
     Notice(String),
+    CommandFailed(String),
 }
 
 struct AgentHost {
@@ -144,7 +149,11 @@ async fn run_loop(terminal: &mut NoyaTerminal, agent: Agent, info: AppInfo) -> R
     flush_unrendered_messages(terminal, &app, &mut ui_runtime)?;
     render_welcome(terminal, &app.info)?;
     let mut input_events = event::EventHandler::new(Duration::from_millis(80));
-    let mut host = spawn_agent_host(agent, SessionManager::discover()?);
+    let mut host = spawn_agent_host(
+        agent,
+        SessionManager::discover()?,
+        CredentialStore::discover()?,
+    );
     let mut approval_response: Option<(String, oneshot::Sender<crate::ApprovalDecision>)> = None;
 
     loop {
@@ -193,12 +202,19 @@ async fn run_loop(terminal: &mut NoyaTerminal, agent: Agent, info: AppInfo) -> R
                             render_session_list(&summaries),
                         ));
                     }
+                    HostEvent::ModelChoices(choices) => {
+                        app.open_model_menu(choices);
+                    }
                     HostEvent::RetrySubmitted(input) => {
                         app.add_message(app::Message::new(app::MessageKind::User, input));
                         app.agent_state = app::AgentState::Thinking;
                     }
                     HostEvent::Notice(message) => {
                         app.add_message(app::Message::new(app::MessageKind::System, message));
+                        app.agent_state = app::AgentState::Idle;
+                    }
+                    HostEvent::CommandFailed(message) => {
+                        app.add_message(app::Message::new(app::MessageKind::Error, message));
                         app.agent_state = app::AgentState::Idle;
                     }
                 }
@@ -241,6 +257,12 @@ fn apply_action(
         }
         TuiAction::NewSession => {
             let _ = command_tx.send(AgentCommand::NewSession);
+        }
+        TuiAction::ListModels => {
+            let _ = command_tx.send(AgentCommand::ListModels);
+        }
+        TuiAction::SwitchModel(model) => {
+            let _ = command_tx.send(AgentCommand::SwitchModel(model));
         }
         TuiAction::ListSessions => {
             let _ = command_tx.send(AgentCommand::ListSessions);
@@ -373,7 +395,11 @@ fn transcript_line_range(
     start..ready_lines.max(start).min(total_lines)
 }
 
-fn spawn_agent_host(mut agent: Agent, manager: SessionManager) -> AgentHost {
+fn spawn_agent_host(
+    mut agent: Agent,
+    manager: SessionManager,
+    model_store: CredentialStore,
+) -> AgentHost {
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (approval_tx, approval_rx) = mpsc::unbounded_channel();
@@ -398,7 +424,8 @@ fn spawn_agent_host(mut agent: Agent, manager: SessionManager) -> AgentHost {
             };
             match command {
                 AgentCommand::Submit(input) => {
-                    let active_workspace = agent.session_summary().workspace;
+                    let active_summary = agent.session_summary();
+                    let active_workspace = active_summary.workspace.clone();
                     let control = TurnControl::interactive(approval_tx.clone());
                     let active_control = control.clone();
                     let turn_events = event_tx.clone();
@@ -477,6 +504,7 @@ fn spawn_agent_host(mut agent: Agent, manager: SessionManager) -> AgentHost {
                                 Some(AgentCommand::Submit(_))
                                 | Some(AgentCommand::Reset)
                                 | Some(AgentCommand::NewSession)
+                                | Some(AgentCommand::SwitchModel(_))
                                 | Some(AgentCommand::ResumeSession(_))
                                 | Some(AgentCommand::RenameSession(_))
                                 | Some(AgentCommand::Retry)
@@ -488,6 +516,9 @@ fn spawn_agent_host(mut agent: Agent, manager: SessionManager) -> AgentHost {
                                     &manager,
                                     active_workspace.clone(),
                                 ),
+                                Some(AgentCommand::ListModels) => {
+                                    send_model_choices(&event_tx, &model_store, &active_summary)
+                                }
                             }
                         }
                     }
@@ -517,6 +548,22 @@ fn spawn_agent_host(mut agent: Agent, manager: SessionManager) -> AgentHost {
                             &event_tx,
                             &format!("Failed to create session: {error}"),
                         ),
+                    }
+                }
+                AgentCommand::ListModels => {
+                    send_model_choices(&event_tx, &model_store, &agent.session_summary());
+                }
+                AgentCommand::SwitchModel(name) => {
+                    match switch_model(&mut agent, &model_store, &name) {
+                        Ok(message) => {
+                            let _ = event_tx.send(session_updated(&agent));
+                            let _ = event_tx.send(HostEvent::Notice(message));
+                        }
+                        Err(error) => {
+                            let _ = event_tx.send(HostEvent::CommandFailed(format!(
+                                "Failed to switch model: {error}"
+                            )));
+                        }
                     }
                 }
                 AgentCommand::ListSessions => send_session_list(&event_tx, &manager, &agent),
@@ -609,6 +656,83 @@ fn send_session_list(
     send_session_list_for_workspace(sender, manager, agent.session_summary().workspace);
 }
 
+fn send_model_choices(
+    sender: &mpsc::UnboundedSender<HostEvent>,
+    store: &CredentialStore,
+    current: &SessionSummary,
+) {
+    match store.model_statuses() {
+        Ok(statuses) => {
+            let choices = logged_in_model_choices(&statuses, &current.model, &current.model_id);
+            if choices.is_empty() {
+                let _ = sender.send(HostEvent::CommandFailed(
+                    "No logged-in models. Run `noya login <model>` first.".to_string(),
+                ));
+            } else {
+                let _ = sender.send(HostEvent::ModelChoices(choices));
+            }
+        }
+        Err(error) => {
+            let _ = sender.send(HostEvent::CommandFailed(format!(
+                "Failed to list models: {error}"
+            )));
+        }
+    }
+}
+
+fn switch_model(agent: &mut Agent, store: &CredentialStore, name: &str) -> Result<String> {
+    let requested = name.parse::<Model>().map_err(anyhow::Error::msg)?;
+    let current = agent.session_summary();
+    if current.model == requested.id() {
+        return Ok(format!(
+            "Already using {} ({}).",
+            requested.id(),
+            current.model_id
+        ));
+    }
+    let model = RuntimeModelConfig::resolve(
+        ModelOverrides {
+            model: Some(requested),
+            ..ModelOverrides::default()
+        },
+        store,
+    )?;
+    let llm = LlmClient::new(
+        model.base_url.clone(),
+        model.api_key.clone(),
+        model.model_id.clone(),
+    )
+    .with_custom_temperature(model.model.supports_custom_temperature());
+    agent.switch_model(model.model.to_string(), llm)?;
+    Ok(format!(
+        "Switched this session to {} ({}).",
+        model.model, model.model_id
+    ))
+}
+
+fn logged_in_model_choices(
+    statuses: &[ModelStatus],
+    current_model: &str,
+    current_model_id: &str,
+) -> Vec<ModelChoice> {
+    statuses
+        .iter()
+        .filter(|status| status.logged_in)
+        .map(|status| {
+            let current = current_model == status.model.id();
+            ModelChoice {
+                model: status.model.id().to_string(),
+                model_id: if current {
+                    current_model_id.to_string()
+                } else {
+                    status.model.default_model_id().to_string()
+                },
+                current,
+            }
+        })
+        .collect()
+}
+
 fn send_session_list_for_workspace(
     sender: &mpsc::UnboundedSender<HostEvent>,
     manager: &SessionManager,
@@ -667,5 +791,37 @@ mod tests {
         assert_eq!(transcript_line_range(true, 0, 7), 0..5);
         assert_eq!(transcript_line_range(true, 5, 9), 5..7);
         assert_eq!(transcript_line_range(false, 7, 10), 7..10);
+    }
+
+    #[test]
+    fn model_choices_only_include_logged_in_models_and_mark_current() {
+        let choices = logged_in_model_choices(
+            &[
+                ModelStatus {
+                    model: Model::DeepSeek,
+                    logged_in: true,
+                    active: true,
+                },
+                ModelStatus {
+                    model: Model::Qwen,
+                    logged_in: true,
+                    active: false,
+                },
+                ModelStatus {
+                    model: Model::Kimi,
+                    logged_in: false,
+                    active: false,
+                },
+            ],
+            "qwen",
+            "qwen-custom",
+        );
+
+        assert_eq!(choices.len(), 2);
+        assert_eq!(choices[0].model, "deepseek");
+        assert!(!choices[0].current);
+        assert_eq!(choices[1].model, "qwen");
+        assert_eq!(choices[1].model_id, "qwen-custom");
+        assert!(choices[1].current);
     }
 }

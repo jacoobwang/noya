@@ -87,22 +87,14 @@ impl Agent {
         session.change_model(model.clone(), llm.model_id().to_string())?;
         let system = prompt::build(&config.workspace)?;
         let tools = ToolRegistry::coding_defaults(config.workspace.clone());
-        let run_id = session.start_runtime(RuntimeSnapshot {
-            noya_version: env!("CARGO_PKG_VERSION").to_string(),
-            workspace: config.workspace.clone(),
-            model,
-            model_id: llm.model_id().to_string(),
-            system_prompt: system.clone(),
-            tool_names: tools
-                .definitions()
-                .into_iter()
-                .map(|definition| definition.function.name)
-                .collect(),
-            max_tool_loops: config.max_tool_loops,
-            tool_timeout_ms: config.tool_timeout.as_millis().min(u64::MAX as u128) as u64,
-            max_tool_output_bytes: config.max_tool_output_bytes,
-            temperature: Some(config.temperature),
-        })?;
+        let run_id = start_runtime(
+            &mut session,
+            &config,
+            &tools,
+            &system,
+            &model,
+            llm.model_id(),
+        )?;
         Ok(Self {
             tools,
             config,
@@ -140,24 +132,32 @@ impl Agent {
         );
         let model = self.session.summary().model;
         session.change_model(model.clone(), self.llm.model_id().to_string())?;
-        let run_id = session.start_runtime(RuntimeSnapshot {
-            noya_version: env!("CARGO_PKG_VERSION").to_string(),
-            workspace: self.config.workspace.clone(),
-            model,
-            model_id: self.llm.model_id().to_string(),
-            system_prompt: self.system_prompt.clone(),
-            tool_names: self
-                .tools
-                .definitions()
-                .into_iter()
-                .map(|definition| definition.function.name)
-                .collect(),
-            max_tool_loops: self.config.max_tool_loops,
-            tool_timeout_ms: self.config.tool_timeout.as_millis().min(u64::MAX as u128) as u64,
-            max_tool_output_bytes: self.config.max_tool_output_bytes,
-            temperature: Some(self.config.temperature),
-        })?;
+        let run_id = start_runtime(
+            &mut session,
+            &self.config,
+            &self.tools,
+            &self.system_prompt,
+            &model,
+            self.llm.model_id(),
+        )?;
         self.session = session;
+        self.run_id = run_id;
+        Ok(())
+    }
+
+    pub fn switch_model(&mut self, model: impl Into<String>, llm: LlmClient) -> Result<()> {
+        let model = model.into();
+        let model_id = llm.model_id().to_string();
+        self.session.change_model(model.clone(), model_id.clone())?;
+        let run_id = start_runtime(
+            &mut self.session,
+            &self.config,
+            &self.tools,
+            &self.system_prompt,
+            &model,
+            &model_id,
+        )?;
+        self.llm = llm;
         self.run_id = run_id;
         Ok(())
     }
@@ -504,6 +504,32 @@ impl Agent {
     }
 }
 
+fn start_runtime(
+    session: &mut Session,
+    config: &AgentConfig,
+    tools: &ToolRegistry,
+    system_prompt: &str,
+    model: &str,
+    model_id: &str,
+) -> Result<RunId> {
+    session.start_runtime(RuntimeSnapshot {
+        noya_version: env!("CARGO_PKG_VERSION").to_string(),
+        workspace: config.workspace.clone(),
+        model: model.to_string(),
+        model_id: model_id.to_string(),
+        system_prompt: system_prompt.to_string(),
+        tool_names: tools
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.function.name)
+            .collect(),
+        max_tool_loops: config.max_tool_loops,
+        tool_timeout_ms: config.tool_timeout.as_millis().min(u64::MAX as u128) as u64,
+        max_tool_output_bytes: config.max_tool_output_bytes,
+        temperature: Some(config.temperature),
+    })
+}
+
 async fn execute_tool(
     tools: &ToolRegistry,
     name: &str,
@@ -578,6 +604,59 @@ mod tests {
             temperature: 0.2,
         };
         assert_eq!(c.workspace, PathBuf::from("repo"));
+    }
+
+    #[test]
+    fn model_switch_replaces_the_client_and_persists_session_metadata() {
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let manager = SessionManager::at(data.path());
+        let session = manager
+            .create(CreateSession {
+                workspace: workspace.path().to_path_buf(),
+                model: "deepseek".to_string(),
+                model_id: "deepseek-v4-flash".to_string(),
+            })
+            .unwrap();
+        let session_id = *session.id();
+        let mut agent = Agent::with_session_for_model(
+            AgentConfig {
+                workspace: workspace.path().to_path_buf(),
+                max_tool_loops: 4,
+                tool_timeout: Duration::from_secs(120),
+                max_tool_output_bytes: 32_768,
+                temperature: 0.2,
+            },
+            LlmClient::new("https://deepseek.example", "secret", "deepseek-v4-flash"),
+            session,
+            "deepseek",
+        )
+        .unwrap();
+
+        agent
+            .switch_model(
+                "qwen",
+                LlmClient::new("https://qwen.example", "other-secret", "qwen3-coder-plus"),
+            )
+            .unwrap();
+
+        let summary = agent.session_summary();
+        assert_eq!(summary.model, "qwen");
+        assert_eq!(summary.model_id, "qwen3-coder-plus");
+        drop(agent);
+
+        let session_directory = data.path().join("sessions").join(session_id.to_string());
+        for entry in std::fs::read_dir(&session_directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                let content = std::fs::read(&path).unwrap();
+                assert!(!String::from_utf8_lossy(&content).contains("other-secret"));
+            }
+        }
+
+        let reopened = manager.open(session_id).unwrap();
+        assert_eq!(reopened.summary().model, "qwen");
+        assert_eq!(reopened.summary().model_id, "qwen3-coder-plus");
     }
 
     async fn stream_response() -> Response<Body> {

@@ -66,6 +66,14 @@ pub enum AgentState {
 pub enum AppMode {
     Normal,
     Confirming,
+    SelectingModel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelChoice {
+    pub model: String,
+    pub model_id: String,
+    pub current: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +83,8 @@ pub enum TuiAction {
     Clear,
     Reset,
     NewSession,
+    ListModels,
+    SwitchModel(String),
     ListSessions,
     ResumeSession(String),
     RenameSession(String),
@@ -91,6 +101,8 @@ pub struct App {
     pub input: String,
     pub cursor_position: usize,
     pub command_selection: usize,
+    pub model_choices: Vec<ModelChoice>,
+    pub model_selection: usize,
     pub streaming_message_id: Option<Uuid>,
     pub agent_state: AgentState,
     pub mode: AppMode,
@@ -111,6 +123,8 @@ impl App {
             input: String::new(),
             cursor_position: 0,
             command_selection: 0,
+            model_choices: Vec::new(),
+            model_selection: 0,
             streaming_message_id: None,
             agent_state: AgentState::Idle,
             mode: AppMode::Normal,
@@ -131,6 +145,8 @@ impl App {
         log_path: Option<PathBuf>,
         context_tokens: usize,
     ) {
+        self.info.model = summary.model.clone();
+        self.info.model_id = summary.model_id.clone();
         self.messages.clear();
         self.streaming_message_id = None;
         self.session = Some(summary);
@@ -138,6 +154,8 @@ impl App {
         self.context_tokens = context_tokens;
         self.agent_state = AgentState::Idle;
         self.mode = AppMode::Normal;
+        self.model_choices.clear();
+        self.model_selection = 0;
         let skipped = transcript.items.len().saturating_sub(200);
         if skipped > 0 {
             self.add_message(Message::new(
@@ -166,6 +184,8 @@ impl App {
         log_path: Option<PathBuf>,
         context_tokens: usize,
     ) {
+        self.info.model = summary.model.clone();
+        self.info.model_id = summary.model_id.clone();
         self.session = Some(summary);
         self.session_log_path = log_path;
         self.context_tokens = context_tokens;
@@ -266,6 +286,8 @@ impl App {
                 self.agent_state = AgentState::Idle;
                 self.mode = AppMode::Normal;
                 self.pending_approval = None;
+                self.model_choices.clear();
+                self.model_selection = 0;
             }
             AgentEvent::Error {
                 turn_id,
@@ -286,6 +308,8 @@ impl App {
                     self.agent_state = AgentState::Error;
                     self.mode = AppMode::Normal;
                     self.pending_approval = None;
+                    self.model_choices.clear();
+                    self.model_selection = 0;
                 }
             }
         }
@@ -336,7 +360,7 @@ impl App {
 
     pub fn accept_selected_command(&mut self) -> Option<TuiAction> {
         let command = self.selected_command()?;
-        let takes_argument = command.argument.is_some();
+        let takes_argument = command.argument_required;
         self.complete_command(command, takes_argument);
         if takes_argument {
             Some(TuiAction::None)
@@ -361,6 +385,47 @@ impl App {
             self.command_menu_dismissed = true;
             true
         }
+    }
+
+    pub fn open_model_menu(&mut self, choices: Vec<ModelChoice>) {
+        self.model_choices = choices;
+        self.model_selection = self
+            .model_choices
+            .iter()
+            .position(|choice| choice.current)
+            .unwrap_or(0);
+        self.mode = AppMode::SelectingModel;
+        self.agent_state = AgentState::Idle;
+        self.status_message = None;
+    }
+
+    pub fn select_next_model(&mut self) {
+        if !self.model_choices.is_empty() {
+            self.model_selection = (self.model_selection + 1) % self.model_choices.len();
+        }
+    }
+
+    pub fn select_previous_model(&mut self) {
+        if !self.model_choices.is_empty() {
+            self.model_selection =
+                (self.model_selection + self.model_choices.len() - 1) % self.model_choices.len();
+        }
+    }
+
+    pub fn accept_selected_model(&mut self) -> TuiAction {
+        let Some(choice) = self.model_choices.get(self.model_selection) else {
+            return TuiAction::None;
+        };
+        let model = choice.model.clone();
+        self.close_model_menu();
+        self.agent_state = AgentState::Thinking;
+        TuiAction::SwitchModel(model)
+    }
+
+    pub fn close_model_menu(&mut self) {
+        self.mode = AppMode::Normal;
+        self.model_choices.clear();
+        self.model_selection = 0;
     }
 
     fn selected_command(&self) -> Option<&'static SlashCommand> {
@@ -388,7 +453,7 @@ impl App {
             "/help" => {
                 self.add_message(Message::new(
                     MessageKind::System,
-                    "Commands: /help /new /sessions /resume <id> /rename <title> /retry /compact /clear /reset /status /cancel /quit",
+                    "Commands: /help /new /model [name] /sessions /resume <id> /rename <title> /retry /compact /clear /reset /status /cancel /quit",
                 ));
                 TuiAction::None
             }
@@ -409,6 +474,15 @@ impl App {
             "/new" => {
                 self.status_message =
                     Some("Agent is busy; cancel before switching sessions.".to_string());
+                TuiAction::None
+            }
+            "/model" if self.agent_state == AgentState::Idle => {
+                self.agent_state = AgentState::Thinking;
+                TuiAction::ListModels
+            }
+            "/model" => {
+                self.status_message =
+                    Some("Agent is busy; cancel before switching models.".to_string());
                 TuiAction::None
             }
             "/sessions" => TuiAction::ListSessions,
@@ -478,6 +552,21 @@ impl App {
                     self.agent_state = AgentState::Thinking;
                     TuiAction::ResumeSession(prefix.to_string())
                 }
+            }
+            _ if input.starts_with("/model ") && self.agent_state == AgentState::Idle => {
+                let model = input[7..].trim();
+                if model.is_empty() {
+                    self.status_message = Some("Usage: /model <name>".to_string());
+                    TuiAction::None
+                } else {
+                    self.agent_state = AgentState::Thinking;
+                    TuiAction::SwitchModel(model.to_string())
+                }
+            }
+            _ if input.starts_with("/model ") => {
+                self.status_message =
+                    Some("Agent is busy; cancel before switching models.".to_string());
+                TuiAction::None
             }
             _ if input.starts_with("/rename ") && self.agent_state == AgentState::Idle => {
                 TuiAction::RenameSession(input[8..].trim().to_string())
@@ -655,6 +744,61 @@ mod tests {
         assert!(status.contains("Model: test"));
         assert!(status.contains("Model ID: test-model"));
         assert!(!status.contains("Provider:"));
+    }
+
+    #[test]
+    fn model_command_lists_or_switches_models_when_idle() {
+        let mut app = app();
+
+        assert_eq!(
+            app.handle_submission("/model".to_string()),
+            TuiAction::ListModels
+        );
+        assert_eq!(app.agent_state, AgentState::Thinking);
+        app.agent_state = AgentState::Idle;
+        assert_eq!(
+            app.handle_submission("/model qwen".to_string()),
+            TuiAction::SwitchModel("qwen".to_string())
+        );
+        assert_eq!(app.agent_state, AgentState::Thinking);
+
+        app.agent_state = AgentState::Generating;
+        assert_eq!(
+            app.handle_submission("/model kimi".to_string()),
+            TuiAction::None
+        );
+        assert!(app.status_message.as_deref().unwrap().contains("busy"));
+    }
+
+    #[test]
+    fn model_menu_starts_on_current_model_and_wraps_selection() {
+        let mut app = app();
+        app.open_model_menu(vec![
+            ModelChoice {
+                model: "deepseek".to_string(),
+                model_id: "deepseek-v4-flash".to_string(),
+                current: false,
+            },
+            ModelChoice {
+                model: "qwen".to_string(),
+                model_id: "qwen3-coder-plus".to_string(),
+                current: true,
+            },
+        ]);
+
+        assert_eq!(app.mode, AppMode::SelectingModel);
+        assert_eq!(app.model_selection, 1);
+        app.select_next_model();
+        assert_eq!(app.model_selection, 0);
+        app.select_previous_model();
+        assert_eq!(app.model_selection, 1);
+        assert_eq!(
+            app.accept_selected_model(),
+            TuiAction::SwitchModel("qwen".to_string())
+        );
+        assert_eq!(app.mode, AppMode::Normal);
+        assert!(app.model_choices.is_empty());
+        assert_eq!(app.agent_state, AgentState::Thinking);
     }
 
     #[test]

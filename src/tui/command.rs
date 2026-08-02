@@ -11,6 +11,7 @@ pub struct SlashCommand {
     pub name: &'static str,
     pub argument: Option<&'static str>,
     pub description: &'static str,
+    pub argument_required: bool,
     scope: CommandScope,
 }
 
@@ -24,6 +25,21 @@ impl SlashCommand {
             name,
             argument,
             description,
+            argument_required: argument.is_some(),
+            scope: CommandScope::Always,
+        }
+    }
+
+    const fn optional(
+        name: &'static str,
+        argument: &'static str,
+        description: &'static str,
+    ) -> Self {
+        Self {
+            name,
+            argument: Some(argument),
+            description,
+            argument_required: false,
             scope: CommandScope::Always,
         }
     }
@@ -37,6 +53,7 @@ impl SlashCommand {
             name,
             argument,
             description,
+            argument_required: argument.is_some(),
             scope: CommandScope::Confirming,
         }
     }
@@ -48,6 +65,7 @@ impl SlashCommand {
 
 const COMMANDS: &[SlashCommand] = &[
     SlashCommand::always("new", None, "Start a new session"),
+    SlashCommand::optional("model", "[name]", "Choose a logged-in model"),
     SlashCommand::always("sessions", None, "List sessions for this workspace"),
     SlashCommand::always("resume", Some("<id>"), "Resume a session by ID prefix"),
     SlashCommand::always("rename", Some("<title>"), "Rename the current session"),
@@ -95,6 +113,7 @@ mod tests {
             .map(|command| command.name)
             .collect::<Vec<_>>();
         assert_eq!(normal, vec!["resume", "rename", "retry", "reset"]);
+        assert_eq!(suggestions("/mo", AppMode::Normal)[0].name, "model");
         assert!(suggestions("/app", AppMode::Normal).is_empty());
         assert_eq!(suggestions("/app", AppMode::Confirming)[0].name, "approve");
     }
