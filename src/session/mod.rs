@@ -42,9 +42,9 @@ impl SessionManager {
     pub fn discover() -> Result<Self> {
         let root = match std::env::var_os("NOYA_DATA_DIR") {
             Some(path) => PathBuf::from(path),
-            None => dirs::data_local_dir()
-                .context("cannot determine the local data directory")?
-                .join("noya"),
+            None => dirs::home_dir()
+                .context("cannot determine the user home directory")?
+                .join(".noya"),
         };
         Ok(Self::at(root))
     }

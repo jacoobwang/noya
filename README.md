@@ -100,7 +100,7 @@ cargo run -- session fork 019fbd63
 cargo run -- session archive 019fbd63
 ```
 
-Session data is stored below `NOYA_DATA_DIR` when set, otherwise in the operating system's local data directory under `noya/`. Each session has an append-only `events.jsonl`, derived `meta.json`, a transient streaming checkpoint, and an advisory lock. Session logs may contain source code, prompts, model reasoning, tool arguments, and command output; protect them as sensitive local data. API keys are never written to session files.
+Session data is stored below `NOYA_DATA_DIR` when set, otherwise in `~/.noya/`. Each session has an append-only `events.jsonl`, derived `meta.json`, a transient streaming checkpoint, and an advisory lock. Session logs may contain source code, prompts, model reasoning, tool arguments, and command output; protect them as sensitive local data. API keys are never written to session files.
 
 To use another OpenAI-compatible endpoint, override the configuration explicitly:
 
