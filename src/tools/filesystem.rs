@@ -2,7 +2,7 @@ use super::Tool;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tokio::process::Command;
 
 pub(super) struct ReadFile {
@@ -15,19 +15,47 @@ impl Tool for ReadFile {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read a UTF-8 file in the workspace"
+        "Read a UTF-8 file or a zero-based line range in the workspace"
     }
     fn parameters(&self) -> Value {
-        json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false})
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "offset": {"type": "integer", "minimum": 0, "description": "Zero-based line offset"},
+                "limit": {"type": "integer", "minimum": 1, "description": "Maximum lines to return"}
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        })
     }
     async fn execute(&self, args: Value) -> Result<Value> {
         let path = workspace_path(
             &self.workspace,
             args["path"].as_str().context("path must be a string")?,
         )?;
-        Ok(
-            json!({"path": path.strip_prefix(&self.workspace).unwrap_or(&path), "content": tokio::fs::read_to_string(path).await?}),
-        )
+        let offset = optional_usize(&args, "offset")?.unwrap_or(0);
+        let limit = optional_usize(&args, "limit")?;
+        if limit == Some(0) {
+            bail!("limit must be greater than zero");
+        }
+        let content = tokio::fs::read_to_string(&path).await?;
+        let lines = content.split_inclusive('\n').collect::<Vec<_>>();
+        let total_lines = lines.len();
+        let start = offset.min(total_lines);
+        let end = limit
+            .map(|limit| start.saturating_add(limit).min(total_lines))
+            .unwrap_or(total_lines);
+        let content = lines[start..end].concat();
+        Ok(json!({
+            "path": path.strip_prefix(&self.workspace).unwrap_or(&path),
+            "content": content,
+            "offset": start,
+            "returned_lines": end.saturating_sub(start),
+            "total_lines": total_lines,
+            "truncated": start > 0 || end < total_lines,
+            "next_offset": (end < total_lines).then_some(end),
+        }))
     }
 }
 
@@ -129,16 +157,92 @@ impl Tool for SearchText {
     }
 }
 
-fn workspace_path(workspace: &Path, raw: &str) -> Result<PathBuf> {
-    let candidate = workspace.join(raw);
+pub(super) fn workspace_path(workspace: &Path, raw: &str) -> Result<PathBuf> {
+    let raw_path = Path::new(raw);
+    if raw_path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        bail!("path is outside workspace: {}", raw);
+    }
+    let candidate = workspace.join(raw_path);
     let workspace = workspace.canonicalize().context("canonicalize workspace")?;
-    let parent = candidate
-        .parent()
-        .unwrap_or(&candidate)
+    let mut existing_ancestor = candidate.as_path();
+    while !existing_ancestor.exists() {
+        existing_ancestor = existing_ancestor
+            .parent()
+            .context("path has no existing ancestor")?;
+    }
+    let resolved = existing_ancestor
         .canonicalize()
-        .unwrap_or_else(|_| workspace.clone());
-    if parent != workspace && !parent.starts_with(&workspace) {
+        .context("canonicalize workspace path")?;
+    if resolved != workspace && !resolved.starts_with(&workspace) {
         bail!("path is outside workspace: {}", raw);
     }
     Ok(candidate)
+}
+
+fn optional_usize(args: &Value, name: &str) -> Result<Option<usize>> {
+    args.get(name)
+        .map(|value| {
+            let value = value
+                .as_u64()
+                .with_context(|| format!("{name} must be a non-negative integer"))?;
+            usize::try_from(value).with_context(|| format!("{name} is too large"))
+        })
+        .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn read_file_returns_a_line_range_with_pagination_metadata() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("sample.txt"), "one\ntwo\nthree\nfour").unwrap();
+        let tool = ReadFile {
+            workspace: workspace.path().to_path_buf(),
+        };
+
+        let result = tool
+            .execute(json!({"path": "sample.txt", "offset": 1, "limit": 2}))
+            .await
+            .unwrap();
+
+        assert_eq!(result["content"], "two\nthree\n");
+        assert_eq!(result["returned_lines"], 2);
+        assert_eq!(result["total_lines"], 4);
+        assert_eq!(result["next_offset"], 3);
+        assert_eq!(result["truncated"], true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_path_rejects_symlinks_that_escape_the_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), workspace.path().join("outside")).unwrap();
+
+        let error = workspace_path(workspace.path(), "outside/file.txt")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("outside workspace"));
+    }
+
+    #[test]
+    fn workspace_path_rejects_parent_directory_traversal() {
+        let workspace = tempfile::tempdir().unwrap();
+
+        let error = workspace_path(workspace.path(), "../outside.txt")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("outside workspace"));
+    }
 }

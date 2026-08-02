@@ -13,7 +13,7 @@ CLI / future HTTP host
        /   \
   Prompt   ToolRegistry
     |       |
- workspace  read/write/list/search/run
+ workspace  read/list/search/patch/write/git/run
           |
        LlmClient (OpenAI-compatible)
 ```
@@ -28,7 +28,7 @@ src/
   agent/    turn loop、事件、取消、审批和 prompt
   llm/      OpenAI-compatible client、协议 DTO 和 SSE
   model/    model catalog、运行配置和本地凭证存储
-  tools/    tool registry、文件工具和命令工具
+  tools/    tool registry、文件/patch/Git 工具和命令工具
   tui/      terminal host、状态、输入事件和渲染
 ```
 
@@ -98,7 +98,9 @@ cargo run -- --model qwen \
 
 `qwen` 默认使用阿里云中国区兼容地址，`kimi` 默认使用中国开放平台地址；其他区域可通过 `--base-url` 覆盖。
 
-`--max-tool-loops` 默认允许 50 轮工具调用。达到上限后仍允许一次最终模型响应；如果该响应继续请求工具，则终止当前 turn，且不会执行超额工具。
+`--max-tool-loops` 默认允许 50 轮工具调用。达到上限后，Noya 会从最后一次 completion 中移除全部 tool definitions，并要求模型基于已经收集的结果回答；任何额外 tool call 都不会执行。
+
+每个 tool call 默认最多执行 120 秒，进入模型上下文的序列化 tool result 默认限制为 32 KiB。可以使用 `--tool-timeout-seconds` 和 `--max-tool-output-bytes` 覆盖。
 
 常用命令：
 
@@ -111,7 +113,18 @@ cargo run -- --model qwen \
 /quit       退出
 ```
 
-`Ctrl+C` 在 Agent 运行时取消当前 turn，空闲时退出；`Ctrl+D` 始终退出。当前 5 个内置 tool 均直接执行，不要求用户确认。`run_command` 会在 workspace 中执行非交互 shell 命令。
+`Ctrl+C` 在 Agent 运行时取消当前 turn，空闲时退出；`Ctrl+D` 始终退出。当前 8 个内置 tool 均直接执行，不要求用户确认：
+
+```text
+read_file    读取完整 UTF-8 文件或 offset/limit 行范围
+list_dir     列出 workspace 目录
+search_text  使用 ripgrep 递归搜索
+apply_patch  一次性执行经过验证、精确且无歧义的文本替换
+write_file   创建或替换 UTF-8 文件
+git_status   查看简洁的分支和工作区状态
+git_diff     查看 staged/unstaged diff，可限制单个路径
+run_command  在 workspace 中执行非交互 shell 命令
+```
 
 ## 当前边界
 
@@ -123,6 +136,5 @@ cargo run -- --model qwen \
 
 1. 为 `run_command` 增加 sandbox adapter，并为未来的高风险 tool 提供可选 approval policy。
 2. 把 session/history/compaction 抽成独立 `SessionStore` seam。
-3. 增加 diff-aware patch 工具，避免模型整文件覆盖。
-4. 增加 HTTP/SSE host；TUI 只保留 transport adapter。
-5. 增加 pause/resume/replay 能力，并保持核心 runtime 与具体业务领域解耦。
+3. 增加 HTTP/SSE host；TUI 只保留 transport adapter。
+4. 增加 pause/resume/replay 能力，并保持核心 runtime 与具体业务领域解耦。

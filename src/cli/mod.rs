@@ -31,6 +31,14 @@ pub struct Cli {
     /// Maximum tool-call rounds; one final model response is still allowed.
     #[arg(long, default_value_t = 50)]
     max_tool_loops: usize,
+
+    /// Maximum execution time for one tool call.
+    #[arg(long, default_value_t = 120)]
+    tool_timeout_seconds: u64,
+
+    /// Maximum serialized tool result retained in the model context.
+    #[arg(long, default_value_t = 32_768)]
+    max_tool_output_bytes: usize,
 }
 
 #[derive(Subcommand)]
@@ -141,6 +149,8 @@ async fn run_agent(cli: Cli, store: &CredentialStore) -> Result<()> {
         AgentConfig {
             workspace: workspace.clone(),
             max_tool_loops: cli.max_tool_loops,
+            tool_timeout: std::time::Duration::from_secs(cli.tool_timeout_seconds),
+            max_tool_output_bytes: cli.max_tool_output_bytes,
             temperature: 0.2,
         },
         LlmClient::new(model.base_url, model.api_key, model.model_id.clone())
@@ -220,6 +230,8 @@ mod tests {
         assert_eq!(run.model, Some(Model::DeepSeek));
         assert_eq!(run.model_id.as_deref(), Some("deepseek-custom"));
         assert_eq!(run.max_tool_loops, 50);
+        assert_eq!(run.tool_timeout_seconds, 120);
+        assert_eq!(run.max_tool_output_bytes, 32_768);
         assert!(run.command.is_none());
     }
 

@@ -93,6 +93,8 @@ src/
   tools/
     mod.rs       Tool interface 和 registry
     filesystem.rs
+    patch.rs
+    git.rs
     command.rs
   tui/
     mod.rs       terminal 初始化、生命周期和主循环
@@ -289,7 +291,9 @@ AgentEvent::TextDelta {
 }
 ```
 
-`max_tool_loops` 统计实际执行的工具轮次，而不是 LLM 请求数。达到上限后 Agent 仍发起一次最终 completion；该响应若不再调用工具则正常完成，若继续请求工具则返回可恢复错误，并且不执行超额工具。
+`max_tool_loops` 统计实际执行的工具轮次，而不是 LLM 请求数。达到上限后 Agent 发起一次强制最终 completion：请求不再携带 tool definitions，并附加基于已有结果完成回答的 system instruction。Provider 即使违规返回 tool call，也不得执行该调用或把整个 turn 转成 recoverable error。
+
+每次 tool call 受统一 timeout 限制；超时转换为结构化失败结果并写回模型上下文。序列化 tool result 超过上限时替换为包含 `truncated`、`original_bytes` 和 `preview` 的有界结果，避免单次工具输出耗尽上下文。
 
 流结束时发送最后一个 `is_final: true` 事件，随后发送 `TurnCompleted`。TUI 不应等待 `TurnCompleted` 才显示文本。
 
@@ -367,7 +371,7 @@ spinner 由 Tick 驱动，不需要 Agent 产生额外动画事件。
 
 ## 11. 工具审批
 
-当前注册的 `read_file`、`write_file`、`list_dir`、`search_text` 和 `run_command` 均直接执行，不要求用户审批。
+当前注册的 `read_file`、`write_file`、`list_dir`、`search_text`、`apply_patch`、`git_status`、`git_diff` 和 `run_command` 均直接执行，不要求用户审批。
 
 `Tool::requires_approval()` 及以下事件保留为扩展能力，但没有内置 tool 启用该能力。未来新增的高风险 tool 可以显式返回 `true`，执行前发出：
 
@@ -446,3 +450,6 @@ Agent command channel
 9. 单元测试覆盖 SSE 解码、增量文本拼接、事件 reducer、命令解析和关键状态转换。
 10. 所有默认内置 tool 均可直接执行，不产生审批事件；
 11. 用户可以取消当前 turn，并保留已经接收的部分输出。
+12. tool loop 达到上限后强制生成最终回答，不执行超额工具；
+13. tool timeout 和输出上限会产生模型可见的结构化结果；
+14. `apply_patch` 在上下文缺失或有歧义时不产生部分写入。

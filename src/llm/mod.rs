@@ -313,6 +313,7 @@ mod tests {
 
         let encoded = serde_json::to_value(request).unwrap();
         assert!(encoded.get("temperature").is_none());
+        assert!(encoded.get("tools").is_none());
     }
 
     #[test]

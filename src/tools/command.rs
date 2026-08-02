@@ -27,6 +27,7 @@ impl Tool for RunCommand {
         let output = Command::new("sh")
             .args(["-lc", command])
             .current_dir(&self.workspace)
+            .kill_on_drop(true)
             .output()
             .await?;
         Ok(

@@ -13,7 +13,7 @@ CLI / future HTTP host
        /   \
   Prompt   ToolRegistry
     |       |
- workspace  read/write/list/search/run
+ workspace  read/list/search/patch/write/git/run
           |
        LlmClient (OpenAI-compatible)
 ```
@@ -28,7 +28,7 @@ src/
   agent/    turn loop, events, cancellation, optional approval, and prompt
   llm/      OpenAI-compatible client, protocol DTOs, and SSE handling
   model/    model catalog, runtime configuration, and local credentials
-  tools/    tool registry, filesystem tools, and command execution
+  tools/    tool registry, filesystem/patch/Git tools, and command execution
   tui/      terminal host, state, input events, and rendering
 ```
 
@@ -98,7 +98,9 @@ Command-line overrides take precedence over model defaults and saved credentials
 
 `qwen` defaults to the Alibaba Cloud China-compatible endpoint, while `kimi` defaults to Moonshot's China API. Use `--base-url` for other regions.
 
-`--max-tool-loops` allows 50 tool-call rounds by default. After the limit is reached, one final model response is still allowed. If that response requests another tool, the current turn stops without executing the extra tool.
+`--max-tool-loops` allows 50 tool-call rounds by default. At the limit, Noya removes all tool definitions from one final completion and instructs the model to answer from the results already collected. Extra tool calls are never executed.
+
+Each tool call has a 120-second timeout by default, and serialized tool results are limited to 32 KiB before entering the model context. Override these limits with `--tool-timeout-seconds` and `--max-tool-output-bytes`.
 
 TUI commands:
 
@@ -111,7 +113,18 @@ TUI commands:
 /quit       Exit
 ```
 
-`Ctrl+C` cancels an active turn and exits when idle. `Ctrl+D` always exits. All five built-in tools execute without confirmation. `run_command` executes non-interactive shell commands inside the workspace.
+`Ctrl+C` cancels an active turn and exits when idle. `Ctrl+D` always exits. All eight built-in tools execute without confirmation:
+
+```text
+read_file    Read a whole UTF-8 file or an offset/limit line range
+list_dir     List a workspace directory
+search_text  Search recursively with ripgrep
+apply_patch  Apply a validated batch of exact, unambiguous text replacements
+write_file   Create or replace a UTF-8 file
+git_status   Show concise branch and working-tree status
+git_diff     Show staged or unstaged changes, optionally for one path
+run_command  Run a non-interactive shell command in the workspace
+```
 
 ## Current Scope
 
@@ -123,6 +136,5 @@ Suggested next steps:
 
 1. Add a sandbox adapter for `run_command` and optional approval policies for future high-risk tools.
 2. Extract session, history, and compaction behind a standalone `SessionStore` seam.
-3. Add a diff-aware patch tool to avoid replacing entire files.
-4. Add an HTTP/SSE host while keeping the TUI as a transport adapter.
-5. Add pause, resume, and replay while keeping the core runtime domain-independent.
+3. Add an HTTP/SSE host while keeping the TUI as a transport adapter.
+4. Add pause, resume, and replay while keeping the core runtime domain-independent.

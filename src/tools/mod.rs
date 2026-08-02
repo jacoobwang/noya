@@ -2,11 +2,15 @@
 
 mod command;
 mod filesystem;
+mod git;
+mod patch;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use command::RunCommand;
 use filesystem::{ListDir, ReadFile, SearchText, WriteFile};
+use git::{GitDiff, GitStatus};
+use patch::ApplyPatch;
 use serde_json::Value;
 use std::{path::PathBuf, sync::Arc};
 
@@ -36,13 +40,22 @@ impl ToolRegistry {
                 Arc::new(ReadFile {
                     workspace: workspace.clone(),
                 }),
-                Arc::new(WriteFile {
-                    workspace: workspace.clone(),
-                }),
                 Arc::new(ListDir {
                     workspace: workspace.clone(),
                 }),
                 Arc::new(SearchText {
+                    workspace: workspace.clone(),
+                }),
+                Arc::new(ApplyPatch {
+                    workspace: workspace.clone(),
+                }),
+                Arc::new(WriteFile {
+                    workspace: workspace.clone(),
+                }),
+                Arc::new(GitStatus {
+                    workspace: workspace.clone(),
+                }),
+                Arc::new(GitDiff {
                     workspace: workspace.clone(),
                 }),
                 Arc::new(RunCommand { workspace }),
@@ -84,7 +97,34 @@ mod tests {
         assert_eq!(registry.requires_approval("read_file"), Some(false));
         assert_eq!(registry.requires_approval("list_dir"), Some(false));
         assert_eq!(registry.requires_approval("search_text"), Some(false));
+        assert_eq!(registry.requires_approval("apply_patch"), Some(false));
+        assert_eq!(registry.requires_approval("git_status"), Some(false));
+        assert_eq!(registry.requires_approval("git_diff"), Some(false));
         assert_eq!(registry.requires_approval("write_file"), Some(false));
         assert_eq!(registry.requires_approval("run_command"), Some(false));
+    }
+
+    #[test]
+    fn coding_defaults_publish_the_complete_tool_catalog() {
+        let registry = ToolRegistry::coding_defaults(PathBuf::from("."));
+        let names = registry
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.function.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            [
+                "read_file",
+                "list_dir",
+                "search_text",
+                "apply_patch",
+                "write_file",
+                "git_status",
+                "git_diff",
+                "run_command",
+            ]
+        );
     }
 }
