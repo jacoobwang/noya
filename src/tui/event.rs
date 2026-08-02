@@ -82,12 +82,18 @@ pub fn handle_key_event(key: KeyEvent, app: &mut App) -> TuiAction {
     }
 
     match key.code {
-        KeyCode::Enter => app.submit_input(),
+        KeyCode::Enter => app
+            .accept_selected_command()
+            .unwrap_or_else(|| app.submit_input()),
+        KeyCode::Up if app.select_previous_command() => TuiAction::None,
+        KeyCode::Down if app.select_next_command() => TuiAction::None,
+        KeyCode::Esc if app.dismiss_command_menu() => TuiAction::None,
         KeyCode::Backspace => {
             if app.cursor_position > 0 {
                 let start = prev_char_boundary(&app.input, app.cursor_position);
                 app.input.replace_range(start..app.cursor_position, "");
                 app.cursor_position = start;
+                app.input_changed();
             }
             TuiAction::None
         }
@@ -95,6 +101,7 @@ pub fn handle_key_event(key: KeyEvent, app: &mut App) -> TuiAction {
             if app.cursor_position < app.input.len() {
                 let end = next_char_boundary(&app.input, app.cursor_position);
                 app.input.replace_range(app.cursor_position..end, "");
+                app.input_changed();
             }
             TuiAction::None
         }
@@ -115,34 +122,16 @@ pub fn handle_key_event(key: KeyEvent, app: &mut App) -> TuiAction {
             TuiAction::None
         }
         KeyCode::Tab => {
-            autocomplete(app);
+            app.complete_selected_command();
             TuiAction::None
         }
         KeyCode::Char(character) => {
             app.input.insert(app.cursor_position, character);
             app.cursor_position += character.len_utf8();
+            app.input_changed();
             TuiAction::None
         }
         _ => TuiAction::None,
-    }
-}
-
-fn autocomplete(app: &mut App) {
-    const COMMANDS: &[&str] = &[
-        "/help", "/clear", "/reset", "/status", "/cancel", "/approve", "/confirm", "/reject",
-        "/modify", "/quit", "/exit",
-    ];
-    if !app.input.starts_with('/') || app.input.contains(' ') {
-        return;
-    }
-    let matches = COMMANDS
-        .iter()
-        .copied()
-        .filter(|command| command.starts_with(&app.input))
-        .collect::<Vec<_>>();
-    if matches.len() == 1 {
-        app.input = matches[0].to_string();
-        app.cursor_position = app.input.len();
     }
 }
 
@@ -215,5 +204,77 @@ mod tests {
 
         app.agent_state = AgentState::Idle;
         assert_eq!(handle_key_event(key, &mut app), TuiAction::Quit);
+    }
+
+    #[test]
+    fn slash_menu_navigates_with_arrows_and_runs_the_selected_command() {
+        let mut app = app();
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.command_suggestions()[0].name, "new");
+
+        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.command_selection, 1);
+        assert_eq!(
+            handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app),
+            TuiAction::ListSessions
+        );
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn selecting_a_command_with_arguments_completes_the_input() {
+        let mut app = app();
+        for character in "/resu".chars() {
+            handle_key_event(
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                &mut app,
+            );
+        }
+
+        assert_eq!(
+            handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app),
+            TuiAction::None
+        );
+        assert_eq!(app.input, "/resume ");
+        assert_eq!(app.cursor_position, app.input.len());
+        assert!(app.command_suggestions().is_empty());
+    }
+
+    #[test]
+    fn up_wraps_to_the_last_suggestion_and_escape_closes_the_menu() {
+        let mut app = app();
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &mut app,
+        );
+        let count = app.command_suggestions().len();
+
+        handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &mut app);
+        assert_eq!(app.command_selection, count - 1);
+        handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
+        assert!(app.command_suggestions().is_empty());
+        assert_eq!(app.input, "/");
+    }
+
+    #[test]
+    fn tab_completes_without_executing_the_command() {
+        let mut app = app();
+        for character in "/stat".chars() {
+            handle_key_event(
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                &mut app,
+            );
+        }
+
+        assert_eq!(
+            handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut app),
+            TuiAction::None
+        );
+        assert_eq!(app.input, "/status");
+        assert!(app.messages.is_empty());
+        assert!(app.command_suggestions().is_empty());
     }
 }

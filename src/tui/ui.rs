@@ -15,8 +15,10 @@ use unicode_width::UnicodeWidthStr;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-pub const VIEWPORT_HEIGHT: u16 = 7;
+pub const VIEWPORT_HEIGHT: u16 = 9;
 const INPUT_PROMPT: &str = "> ";
+const COMMAND_MENU_HEIGHT: u16 = 6;
+const COMMAND_MENU_MAX_VISIBLE: usize = 5;
 const WIDE_WELCOME_MIN_WIDTH: usize = 68;
 const NOYA_LOGO: [&str; 5] = [
     "█   █  ███  █   █  ███",
@@ -33,16 +35,106 @@ pub struct StreamView {
 }
 
 pub fn draw(frame: &mut Frame, app: &App, stream_view: Option<StreamView>) {
-    let [stream_area, status_area, input_area] = Layout::vertical([
+    let command_menu_open = !app.command_suggestions().is_empty();
+    let [stream_area, status_area, input_area, command_menu_area] =
+        tui_areas(frame.area(), command_menu_open);
+
+    if !command_menu_open {
+        render_stream(frame, stream_area, app, stream_view);
+    }
+    render_status(frame, status_area, app);
+    render_input(frame, input_area, app);
+    if command_menu_open {
+        render_command_menu(frame, command_menu_area, app);
+    }
+}
+
+fn tui_areas(area: Rect, command_menu_open: bool) -> [Rect; 4] {
+    Layout::vertical([
         Constraint::Min(0),
         Constraint::Length(1),
         Constraint::Length(2),
+        Constraint::Length(if command_menu_open {
+            COMMAND_MENU_HEIGHT
+        } else {
+            0
+        }),
     ])
-    .areas(frame.area());
+    .areas(area)
+}
 
-    render_stream(frame, stream_area, app, stream_view);
-    render_status(frame, status_area, app);
-    render_input(frame, input_area, app);
+fn render_command_menu(frame: &mut Frame, area: Rect, app: &App) {
+    if area.is_empty() {
+        return;
+    }
+    let lines = command_menu_lines(app, usize::from(area.height));
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn command_menu_lines(app: &App, height: usize) -> Vec<Line<'static>> {
+    let suggestions = app.command_suggestions();
+    if suggestions.is_empty() || height == 0 {
+        return Vec::new();
+    }
+    let selected = app.command_selection.min(suggestions.len() - 1);
+    let visible_count = COMMAND_MENU_MAX_VISIBLE
+        .min(height.saturating_sub(1).max(1))
+        .min(suggestions.len());
+    let start = selected
+        .saturating_sub(visible_count - 1)
+        .min(suggestions.len() - visible_count);
+    let mut lines = Vec::with_capacity(visible_count + 1);
+    for (index, command) in suggestions
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible_count)
+    {
+        let is_selected = index == selected;
+        let marker_style = Style::default()
+            .fg(if is_selected {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            })
+            .add_modifier(if is_selected {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            });
+        let text_style = if is_selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let description_style = if is_selected {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let usage = command.argument.map_or_else(
+            || command.name.to_string(),
+            |argument| format!("{} {argument}", command.name),
+        );
+        lines.push(Line::from(vec![
+            Span::styled(if is_selected { "› " } else { "  " }, marker_style),
+            Span::styled(format!("{usage:<20}"), text_style),
+            Span::styled(command.description, description_style),
+        ]));
+    }
+    if lines.len() < height {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  ({}/{})  ↑/↓ navigate · Enter select · Esc close",
+                selected + 1,
+                suggestions.len()
+            ),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines
 }
 
 pub fn welcome_lines(info: &AppInfo, width: usize) -> Vec<Line<'static>> {
@@ -538,5 +630,38 @@ mod tests {
         assert!(rendered.contains("Qwen · qwen3-coder-plus"));
         assert!(rendered.contains("/repo"));
         assert!(rendered.contains("█ █ █ █   █   █   █████"));
+    }
+
+    #[test]
+    fn command_menu_renders_selection_descriptions_and_navigation_hint() {
+        let mut app = App::new(AppInfo {
+            workspace: PathBuf::from("/repo"),
+            model: "qwen".to_string(),
+            model_id: "qwen3-coder-plus".to_string(),
+        });
+        app.input = "/".to_string();
+        app.input_changed();
+
+        let rendered = command_menu_lines(&app, 6)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("› new"));
+        assert!(rendered.contains("Start a new session"));
+        assert!(rendered.contains("↑/↓ navigate"));
+        assert!(rendered.contains("(1/12)"));
+    }
+
+    #[test]
+    fn command_menu_is_laid_out_below_the_input() {
+        let [stream, status, input, menu] = tui_areas(Rect::new(0, 0, 80, VIEWPORT_HEIGHT), true);
+
+        assert!(stream.is_empty());
+        assert_eq!(status.height, 1);
+        assert_eq!(input.height, 2);
+        assert_eq!(menu.y, input.bottom());
+        assert_eq!(menu.height, COMMAND_MENU_HEIGHT);
     }
 }

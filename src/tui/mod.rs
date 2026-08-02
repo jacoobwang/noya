@@ -1,6 +1,7 @@
 //! Inline terminal host for Noya.
 
 mod app;
+mod command;
 mod event;
 mod markdown;
 mod ui;

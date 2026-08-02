@@ -1,3 +1,4 @@
+use crate::tui::command::{self, SlashCommand};
 use crate::{
     AgentEvent, ApprovalDecision, ApprovalRequest,
     session::{SessionSummary, Transcript, TranscriptKind},
@@ -89,6 +90,7 @@ pub struct App {
     pub messages: VecDeque<Message>,
     pub input: String,
     pub cursor_position: usize,
+    pub command_selection: usize,
     pub streaming_message_id: Option<Uuid>,
     pub agent_state: AgentState,
     pub mode: AppMode,
@@ -98,6 +100,7 @@ pub struct App {
     pub session: Option<SessionSummary>,
     pub session_log_path: Option<PathBuf>,
     pub context_tokens: usize,
+    command_menu_dismissed: bool,
 }
 
 impl App {
@@ -107,6 +110,7 @@ impl App {
             messages: VecDeque::new(),
             input: String::new(),
             cursor_position: 0,
+            command_selection: 0,
             streaming_message_id: None,
             agent_state: AgentState::Idle,
             mode: AppMode::Normal,
@@ -116,6 +120,7 @@ impl App {
             session: None,
             session_log_path: None,
             context_tokens: 0,
+            command_menu_dismissed: false,
         }
     }
 
@@ -293,7 +298,89 @@ impl App {
         }
         self.input.clear();
         self.cursor_position = 0;
+        self.command_selection = 0;
+        self.command_menu_dismissed = false;
         self.handle_submission(input)
+    }
+
+    pub fn input_changed(&mut self) {
+        self.command_selection = 0;
+        self.command_menu_dismissed = false;
+    }
+
+    pub fn command_suggestions(&self) -> Vec<&'static SlashCommand> {
+        if self.command_menu_dismissed {
+            Vec::new()
+        } else {
+            command::suggestions(&self.input, self.mode)
+        }
+    }
+
+    pub fn select_next_command(&mut self) -> bool {
+        let count = self.command_suggestions().len();
+        if count == 0 {
+            return false;
+        }
+        self.command_selection = (self.command_selection + 1) % count;
+        true
+    }
+
+    pub fn select_previous_command(&mut self) -> bool {
+        let count = self.command_suggestions().len();
+        if count == 0 {
+            return false;
+        }
+        self.command_selection = (self.command_selection + count - 1) % count;
+        true
+    }
+
+    pub fn accept_selected_command(&mut self) -> Option<TuiAction> {
+        let command = self.selected_command()?;
+        let takes_argument = command.argument.is_some();
+        self.complete_command(command, takes_argument);
+        if takes_argument {
+            Some(TuiAction::None)
+        } else {
+            Some(self.submit_input())
+        }
+    }
+
+    pub fn complete_selected_command(&mut self) -> bool {
+        let Some(command) = self.selected_command() else {
+            return false;
+        };
+        self.complete_command(command, command.argument.is_some());
+        self.command_menu_dismissed = true;
+        true
+    }
+
+    pub fn dismiss_command_menu(&mut self) -> bool {
+        if self.command_suggestions().is_empty() {
+            false
+        } else {
+            self.command_menu_dismissed = true;
+            true
+        }
+    }
+
+    fn selected_command(&self) -> Option<&'static SlashCommand> {
+        let suggestions = self.command_suggestions();
+        suggestions
+            .get(
+                self.command_selection
+                    .min(suggestions.len().saturating_sub(1)),
+            )
+            .copied()
+    }
+
+    fn complete_command(&mut self, command: &SlashCommand, append_space: bool) {
+        self.input = command.input();
+        if append_space {
+            self.input.push(' ');
+        }
+        self.cursor_position = self.input.len();
+        self.command_selection = 0;
+        self.command_menu_dismissed = append_space;
     }
 
     pub fn handle_submission(&mut self, input: String) -> TuiAction {
