@@ -504,7 +504,13 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         app.input.clone()
     };
-    let (visible, cursor_column) = visible_input(&rendered_input, app.cursor_position, available);
+    let rendered_cursor = rendered_cursor_position(
+        &app.input,
+        &rendered_input,
+        app.cursor_position,
+        app.model_setup_is_secret(),
+    );
+    let (visible, cursor_column) = visible_input(&rendered_input, rendered_cursor, available);
     let text = if app.mode == AppMode::SelectingModel {
         Span::styled(
             "Select a model with ↑/↓ and Enter.",
@@ -570,6 +576,23 @@ fn visible_input(input: &str, cursor_byte: usize, available: usize) -> (String, 
         visible,
         UnicodeWidthStr::width(&input[start_byte..cursor_byte]),
     )
+}
+
+fn rendered_cursor_position(
+    input: &str,
+    rendered_input: &str,
+    cursor_byte: usize,
+    secret: bool,
+) -> usize {
+    if secret {
+        let character_count = input[..cursor_byte.min(input.len())].chars().count();
+        rendered_input
+            .char_indices()
+            .nth(character_count)
+            .map_or(rendered_input.len(), |(byte, _)| byte)
+    } else {
+        cursor_byte
+    }
 }
 
 fn message_style(kind: MessageKind) -> (&'static str, Style, Style) {
@@ -789,5 +812,15 @@ mod tests {
         assert!(rendered.contains("› qwen"));
         assert!(rendered.contains("✓ current"));
         assert!(rendered.contains("All models"));
+    }
+
+    #[test]
+    fn secret_input_maps_utf8_cursor_to_masked_input_index() {
+        let input = "é";
+        let rendered_cursor = rendered_cursor_position(input, "•", input.len(), true);
+        let (visible, cursor_column) = visible_input("•", rendered_cursor, 10);
+
+        assert_eq!(visible, "•");
+        assert_eq!(cursor_column, 1);
     }
 }
