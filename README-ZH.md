@@ -50,6 +50,17 @@ NOYA_VERSION=v0.2.0 NOYA_INSTALL_DIR=/usr/local/bin sh scripts/install.sh
 NOYA_SKIP_RIPGREP=1 sh scripts/install.sh
 ```
 
+已安装的 Noya 可以直接升级或卸载：
+
+```bash
+noya upgrade                 # 升级到最新版本
+noya upgrade --version v0.3.0
+noya uninstall               # 确认后删除可执行文件
+noya uninstall --yes         # 不确认直接删除
+```
+
+卸载只会删除 Noya 可执行文件，`~/.noya` 下的配置和 session 数据会保留。
+
 发布的 Release 需要提供 `noya-<rust-target>.tar.gz`，压缩包顶层包含 `noya` 可执行文件，同时提供对应的 `SHA256SUMS`。
 
 ## 运行

@@ -50,6 +50,17 @@ NOYA_VERSION=v0.2.0 NOYA_INSTALL_DIR=/usr/local/bin sh scripts/install.sh
 NOYA_SKIP_RIPGREP=1 sh scripts/install.sh
 ```
 
+An installed Noya binary can update or remove itself:
+
+```bash
+noya upgrade                 # install the latest release
+noya upgrade --version v0.3.0
+noya uninstall               # confirm before removing the binary
+noya uninstall --yes         # remove without confirmation
+```
+
+Uninstall removes only the executable. Noya configuration and sessions under `~/.noya` are preserved.
+
 Published releases must provide `noya-<rust-target>.tar.gz` archives containing a top-level `noya` executable and a matching `SHA256SUMS` file.
 
 ## Usage

@@ -6,7 +6,12 @@ use noya::{
     session::{CreateSession, ExportFormat, SessionFilter, SessionManager, SessionSummary},
     tui,
 };
-use std::{io, io::Write, path::PathBuf};
+use std::{
+    env, fs,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    process::Command as ProcessCommand,
+};
 
 #[derive(Parser)]
 #[command(name = "noya", about = "A coding agent for repository tasks")]
@@ -44,6 +49,18 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Upgrade the installed Noya binary to the latest release.
+    Upgrade {
+        /// Install a specific release tag instead of the latest release.
+        #[arg(long)]
+        version: Option<String>,
+    },
+    /// Uninstall the current Noya binary without removing user data.
+    Uninstall {
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Sign in to a supported model.
     Login {
         /// Model to configure.
@@ -108,20 +125,115 @@ enum SessionExportFormat {
 }
 
 pub async fn run(mut cli: Cli) -> Result<()> {
-    let store = CredentialStore::discover()?;
     match cli.command.take() {
-        Some(Command::Login { model }) => login(model, &store),
-        Some(Command::Logout { model }) => logout(model, &store),
-        Some(Command::Models) => models(&store),
-        Some(Command::Resume { session_id }) => resume_agent(cli, &store, session_id).await,
+        Some(Command::Upgrade { version }) => upgrade(version),
+        Some(Command::Uninstall { yes }) => uninstall(yes),
+        command => {
+            let store = CredentialStore::discover()?;
+            run_with_store(cli, command, &store).await
+        }
+    }
+}
+
+async fn run_with_store(cli: Cli, command: Option<Command>, store: &CredentialStore) -> Result<()> {
+    match command {
+        Some(Command::Login { model }) => login(model, store),
+        Some(Command::Logout { model }) => logout(model, store),
+        Some(Command::Models) => models(store),
+        Some(Command::Resume { session_id }) => resume_agent(cli, store, session_id).await,
         Some(Command::Sessions {
             all,
             archived,
             json,
         }) => sessions(&cli, all, archived, json),
         Some(Command::Session { command }) => session_command(command),
-        None => run_new_agent(cli, &store).await,
+        None => run_new_agent(cli, store).await,
+        Some(Command::Upgrade { .. }) | Some(Command::Uninstall { .. }) => {
+            unreachable!("installation commands are handled before loading credentials")
+        }
     }
+}
+
+fn upgrade(version: Option<String>) -> Result<()> {
+    let executable = installed_executable()?;
+    let install_dir = executable
+        .parent()
+        .context("installed Noya executable has no parent directory")?;
+    let repository = env::var("NOYA_REPOSITORY").unwrap_or_else(|_| "jacoobwang/noya".to_string());
+    let script_url =
+        format!("https://raw.githubusercontent.com/{repository}/main/scripts/install.sh");
+    println!("Upgrading Noya in {}...", install_dir.display());
+
+    let mut installer = ProcessCommand::new("sh");
+    installer
+        .arg("-c")
+        .arg(
+            "if command -v curl >/dev/null 2>&1; then \
+                curl --fail --silent --show-error --location \"$NOYA_INSTALL_SCRIPT\"; \
+             elif command -v wget >/dev/null 2>&1; then \
+                wget --quiet --output-document=- \"$NOYA_INSTALL_SCRIPT\"; \
+             else \
+                echo 'noya: curl or wget is required to upgrade' >&2; exit 1; \
+             fi | sh",
+        )
+        .env("NOYA_INSTALL_SCRIPT", script_url)
+        .env("NOYA_INSTALL_DIR", install_dir);
+    if let Some(version) = version {
+        installer.env("NOYA_VERSION", version);
+    }
+    let status = installer.status().context("run Noya installer")?;
+    if !status.success() {
+        bail!("Noya upgrade failed with status {status}");
+    }
+    Ok(())
+}
+
+fn uninstall(yes: bool) -> Result<()> {
+    let executable = installed_executable()?;
+    if !yes {
+        print!(
+            "Remove {}? User data in ~/.noya will be kept. [y/N] ",
+            executable.display()
+        );
+        io::stdout().flush().context("flush uninstall prompt")?;
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("read uninstall confirmation")?;
+        if !matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            println!("Uninstall cancelled.");
+            return Ok(());
+        }
+    }
+    fs::remove_file(&executable)
+        .with_context(|| format!("remove Noya executable {}", executable.display()))?;
+    println!(
+        "Removed {}. User data in ~/.noya was kept.",
+        executable.display()
+    );
+    Ok(())
+}
+
+fn installed_executable() -> Result<PathBuf> {
+    let executable = env::current_exe().context("find the running Noya executable")?;
+    if is_development_binary(&executable) {
+        bail!(
+            "{} is a development binary; run upgrade/uninstall on an installed Noya binary",
+            executable.display()
+        );
+    }
+    if executable.file_name().and_then(|name| name.to_str()) != Some("noya") {
+        bail!(
+            "current executable is not a Noya binary: {}",
+            executable.display()
+        );
+    }
+    Ok(executable)
+}
+
+fn is_development_binary(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == "target")
 }
 
 fn login(model: Model, store: &CredentialStore) -> Result<()> {
@@ -498,6 +610,23 @@ mod tests {
         assert_eq!(run.tool_timeout_seconds, 120);
         assert_eq!(run.max_tool_output_bytes, 32_768);
         assert!(run.command.is_none());
+    }
+
+    #[test]
+    fn parses_upgrade_and_uninstall_commands() {
+        let upgrade = Cli::try_parse_from(["noya", "upgrade", "--version", "v0.3.0"]).unwrap();
+        assert!(matches!(
+            upgrade.command,
+            Some(Command::Upgrade {
+                version: Some(version)
+            }) if version == "v0.3.0"
+        ));
+
+        let uninstall = Cli::try_parse_from(["noya", "uninstall", "--yes"]).unwrap();
+        assert!(matches!(
+            uninstall.command,
+            Some(Command::Uninstall { yes: true })
+        ));
     }
 
     #[test]
