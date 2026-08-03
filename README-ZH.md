@@ -41,7 +41,7 @@ src/
 curl -fsSL https://raw.githubusercontent.com/jacoobwang/noya/main/scripts/install.sh | sh
 ```
 
-Noya 目前只发布 macOS 版本，同时支持 Apple Silicon 和 Intel。安装脚本会识别 CPU 架构，使用 `SHA256SUMS` 校验 Release 文件，并默认把 `noya` 安装到 `~/.local/bin`。如果没有 `rg` 但存在 Homebrew，脚本会执行 `brew install ripgrep`；脚本不会自动安装 Homebrew。
+Noya 目前只发布 macOS 版本，同时支持 Apple Silicon 和 Intel。安装脚本会识别 CPU 架构，使用 `SHA256SUMS` 校验 Release 文件，默认把 `noya` 安装到 `~/.local/bin`，并在该目录不在 `PATH` 时自动写入检测到的 Bash 或 Zsh 配置文件。安装完成后请重启当前 shell，或执行安装器输出的命令。如果没有 `rg` 但存在 Homebrew，脚本会执行 `brew install ripgrep`；脚本不会自动安装 Homebrew。
 
 可选覆盖参数：
 

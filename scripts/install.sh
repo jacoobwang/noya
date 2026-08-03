@@ -104,6 +104,47 @@ ensure_ripgrep() {
     fi
 }
 
+configure_path() {
+    case ":${PATH:-}:" in
+        *":${INSTALL_DIR}:"*)
+            say "$INSTALL_DIR is already on PATH"
+            return
+            ;;
+    esac
+
+    shell_name=${SHELL:-}
+    shell_name=${shell_name##*/}
+    case "$shell_name" in
+        zsh)
+            shell_config=${ZDOTDIR:-$HOME}/.zshrc
+            ;;
+        bash)
+            if [ -f "$HOME/.bash_profile" ]; then
+                shell_config=$HOME/.bash_profile
+            else
+                shell_config=$HOME/.bashrc
+            fi
+            ;;
+        *)
+            warn "$INSTALL_DIR is not on PATH; add it to your shell configuration"
+            return
+            ;;
+    esac
+
+    if [ -f "$shell_config" ] && grep -F "$INSTALL_DIR" "$shell_config" >/dev/null 2>&1; then
+        say "$INSTALL_DIR is already configured in $shell_config"
+        return
+    fi
+
+    if ! printf '\n# Added by noya-installer\nexport PATH="%s:$PATH"\n' "$INSTALL_DIR" >> "$shell_config"; then
+        warn "could not update $shell_config; add $INSTALL_DIR to your shell configuration"
+        return
+    fi
+
+    say "added $INSTALL_DIR to $shell_config"
+    warn "restart your shell or run: export PATH=\"$INSTALL_DIR:\$PATH\""
+}
+
 main() {
     has uname || die "uname is required to detect the platform"
     has tar || die "tar is required to unpack Noya"
@@ -142,10 +183,7 @@ main() {
 
     ensure_ripgrep
 
-    case ":${PATH}:" in
-        *":${INSTALL_DIR}:"*) ;;
-        *) warn "$INSTALL_DIR is not on PATH; add it to your shell configuration" ;;
-    esac
+    configure_path
     say "run 'noya login <model>' to configure a model"
 }
 
