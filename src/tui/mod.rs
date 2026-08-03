@@ -757,7 +757,7 @@ fn send_model_choices(
 ) {
     match store.model_statuses() {
         Ok(statuses) => {
-            let choices = logged_in_model_choices(&statuses, &current.model, &current.model_id);
+            let choices = model_choices(&statuses, &current.model, &current.model_id);
             if choices.is_empty() {
                 let _ = sender.send(HostEvent::CommandFailed(
                     "No logged-in models. Run `noya login <model>` first.".to_string(),
@@ -804,14 +804,13 @@ fn switch_model(agent: &mut Agent, store: &CredentialStore, name: &str) -> Resul
     ))
 }
 
-fn logged_in_model_choices(
+fn model_choices(
     statuses: &[ModelStatus],
     current_model: &str,
     current_model_id: &str,
 ) -> Vec<ModelChoice> {
     statuses
         .iter()
-        .filter(|status| status.logged_in || status.model.id() == current_model)
         .map(|status| {
             let current = current_model == status.model.id();
             ModelChoice {
@@ -888,8 +887,8 @@ mod tests {
     }
 
     #[test]
-    fn model_choices_only_include_logged_in_models_and_mark_current() {
-        let choices = logged_in_model_choices(
+    fn model_choices_include_all_models_and_mark_current() {
+        let choices = model_choices(
             &[
                 ModelStatus {
                     model: Model::DeepSeek,
@@ -911,17 +910,18 @@ mod tests {
             "qwen-custom",
         );
 
-        assert_eq!(choices.len(), 2);
+        assert_eq!(choices.len(), 3);
         assert_eq!(choices[0].model, "deepseek");
         assert!(!choices[0].current);
         assert_eq!(choices[1].model, "qwen");
         assert_eq!(choices[1].model_id, "qwen-custom");
         assert!(choices[1].current);
+        assert_eq!(choices[2].model, "kimi");
     }
 
     #[test]
     fn model_choices_include_the_current_model_without_a_saved_credential() {
-        let choices = logged_in_model_choices(
+        let choices = model_choices(
             &[
                 ModelStatus {
                     model: Model::OpenAi,
@@ -938,9 +938,10 @@ mod tests {
             "gpt-4o",
         );
 
-        assert_eq!(choices.len(), 1);
+        assert_eq!(choices.len(), 2);
         assert_eq!(choices[0].model, "openai");
         assert_eq!(choices[0].model_id, "gpt-4o");
         assert!(choices[0].current);
+        assert_eq!(choices[1].model, "deepseek");
     }
 }

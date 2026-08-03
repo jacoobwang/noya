@@ -120,7 +120,7 @@ fn model_menu_lines(app: &App, height: usize) -> Vec<Line<'static>> {
     }
     if lines.len() < height {
         lines.push(Line::from(Span::styled(
-            "  Logged-in models only · ↑/↓ select · Enter switch · Esc close",
+            "  All models · unconfigured models will ask for base URL and API key · ↑/↓ select · Enter switch · Esc close",
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -788,6 +788,6 @@ mod tests {
         assert!(rendered.contains("deepseek"));
         assert!(rendered.contains("› qwen"));
         assert!(rendered.contains("✓ current"));
-        assert!(rendered.contains("Logged-in models only"));
+        assert!(rendered.contains("All models"));
     }
 }
