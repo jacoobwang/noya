@@ -106,7 +106,7 @@ kimi      kimi-k3             not logged in
 | `qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3-coder-plus` | `DASHSCOPE_API_KEY` |
 | `kimi` | `https://api.moonshot.cn/v1` | `kimi-k3` | `MOONSHOT_API_KEY` |
 
-凭证保存在系统用户配置目录的 `noya/credentials.json` 中，实际路径会在登录成功后输出；Unix 下目录权限为 `0700`，文件权限为 `0600`。也可以用上表中的环境变量临时提供凭证。
+凭证保存在当前用户 home 目录下的 `~/.noya/credentials.json` 中。设置 `NOYA_CONFIG_DIR` 可以使用其他凭证目录。实际路径会在登录成功后输出；Unix 下目录权限为 `0700`，文件权限为 `0600`。也可以用上表中的环境变量临时提供凭证。
 
 启动后进入 inline TUI，欢迎区会显示当前 Noya 版本、活动 model、实际 Model ID 和 workspace 目录。输入 `/` 打开命令菜单，使用 ↑/↓ 选择命令，Enter 应用命令，Tab 只补全而不执行，Esc 关闭菜单。已经发送的用户消息右对齐，Agent 输出左对齐；Agent 回复会边生成、边渲染 Markdown、边写入终端原生 scrollback，不需要等待回答结束才能查看完整输出。支持标题、强调、行内代码、代码块、列表、引用和链接；`/status` 会显示当前 model 和实际 Model ID。
 

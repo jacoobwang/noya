@@ -142,8 +142,8 @@ impl CredentialStore {
     pub fn discover() -> Result<Self> {
         let directory = match std::env::var_os("NOYA_CONFIG_DIR") {
             Some(path) => PathBuf::from(path),
-            None => dirs::config_dir()
-                .context("cannot determine the user config directory")?
+            None => dirs::home_dir()
+                .context("cannot determine the user home directory")?
                 .join("noya"),
         };
         Ok(Self::at(directory.join("credentials.json")))
@@ -388,6 +388,14 @@ mod tests {
         assert_eq!(overridden.api_key, "override-key");
         assert_eq!(overridden.base_url, "https://gateway.example/v1");
         assert_eq!(overridden.model_id, "custom-model");
+    }
+
+    #[test]
+    fn discovered_credentials_live_under_the_user_home_directory() {
+        let store = CredentialStore::discover().unwrap();
+        let expected = dirs::home_dir().unwrap().join("noya/credentials.json");
+
+        assert_eq!(store.path(), expected);
     }
 
     #[cfg(unix)]

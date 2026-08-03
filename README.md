@@ -106,7 +106,7 @@ Default model configuration:
 | `qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3-coder-plus` | `DASHSCOPE_API_KEY` |
 | `kimi` | `https://api.moonshot.cn/v1` | `kimi-k3` | `MOONSHOT_API_KEY` |
 
-Credentials are stored in `noya/credentials.json` under the current user's system configuration directory. The exact path is printed after a successful login. On Unix, the directory uses mode `0700` and the file uses mode `0600`. The environment variables above can also provide temporary credentials.
+Credentials are stored in `~/.noya/credentials.json` under the current user's home directory. Set `NOYA_CONFIG_DIR` to use another credentials directory. The exact path is printed after a successful login. On Unix, the directory uses mode `0700` and the file uses mode `0600`. The environment variables above can also provide temporary credentials.
 
 Noya starts in an inline TUI with a welcome header showing the installed version, active model and Model ID, and workspace directory. Type `/` to open the command menu, use ↑/↓ to select a command, Enter to apply it, Tab to complete it without running, and Esc to close the menu. Sent user messages are right-aligned and Agent output is left-aligned. Agent responses are streamed, rendered as Markdown, and written to native terminal scrollback while generation is still in progress. Supported Markdown includes headings, emphasis, inline code, code blocks, lists, blockquotes, and links. `/status` displays the active model and concrete Model ID.
 
