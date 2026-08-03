@@ -77,7 +77,7 @@ noya
 
 如果从源码运行，在 Noya 参数前使用 `cargo run --`。例如，`noya login deepseek` 对应 `cargo run -- login deepseek`，裸 `noya` 对应 `cargo run`。
 
-目前支持 `openai`、`deepseek`、`qwen` 和 `kimi`：
+目前支持 `openai`、`deepseek`、`qwen`、`kimi` 和 `claude`；Claude 通过 OpenAI 兼容网关接入：
 
 ```bash
 noya login openai
@@ -97,6 +97,7 @@ openai    gpt-4o              not logged in
 deepseek  deepseek-v4-flash   not logged in
 qwen      qwen3-coder-plus    active
 kimi      kimi-k3             not logged in
+claude    claude-sonnet-4     not logged in
 ```
 
 各 model 的默认配置：
@@ -106,11 +107,14 @@ kimi      kimi-k3             not logged in
 | `openai` | `https://api.openai.com/v1` | `gpt-4o` | `OPENAI_API_KEY` |
 | `deepseek` | `https://api.deepseek.com` | `deepseek-v4-flash` | `DEEPSEEK_API_KEY` |
 | `qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3-coder-plus` | `DASHSCOPE_API_KEY` |
+| `claude` | `https://openrouter.ai/api/v1` | `claude-sonnet-4` | `CLAUDE_API_KEY` |
 | `kimi` | `https://api.moonshot.cn/v1` | `kimi-k3` | `MOONSHOT_API_KEY` |
 
 凭证保存在当前用户 home 目录下的 `~/.noya/credentials.json` 中。设置 `NOYA_CONFIG_DIR` 可以使用其他凭证目录。实际路径会在登录成功后输出；Unix 下目录权限为 `0700`，文件权限为 `0600`。也可以用上表中的环境变量临时提供凭证。
 
 每个 provider 都可以单独配置 OpenAI 兼容接口地址和模型 ID；省略时使用 Noya 内置默认值：
+
+Claude 使用 OpenAI 兼容网关，不是 Anthropic 原生 Messages API。请将 `base_url` 设置为你的网关地址，并使用网关分配的 API key。
 
 ```json
 {

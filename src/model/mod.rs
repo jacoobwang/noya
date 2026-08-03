@@ -21,6 +21,7 @@ pub enum Model {
     DeepSeek,
     Qwen,
     Kimi,
+    Claude,
 }
 
 impl Model {
@@ -30,6 +31,7 @@ impl Model {
             Self::DeepSeek => "deepseek",
             Self::Qwen => "qwen",
             Self::Kimi => "kimi",
+            Self::Claude => "claude",
         }
     }
 
@@ -39,6 +41,7 @@ impl Model {
             Self::DeepSeek => "https://api.deepseek.com",
             Self::Qwen => "https://dashscope.aliyuncs.com/compatible-mode/v1",
             Self::Kimi => "https://api.moonshot.cn/v1",
+            Self::Claude => "https://openrouter.ai/api/v1",
         }
     }
 
@@ -48,6 +51,7 @@ impl Model {
             Self::DeepSeek => "deepseek-v4-flash",
             Self::Qwen => "qwen3-coder-plus",
             Self::Kimi => "kimi-k3",
+            Self::Claude => "claude-sonnet-4",
         }
     }
 
@@ -57,6 +61,7 @@ impl Model {
             Self::DeepSeek => "DeepSeek API key",
             Self::Qwen => "Qwen API key",
             Self::Kimi => "Kimi API key",
+            Self::Claude => "Claude API key",
         }
     }
 
@@ -66,6 +71,7 @@ impl Model {
             Self::DeepSeek => "DEEPSEEK_API_KEY",
             Self::Qwen => "DASHSCOPE_API_KEY",
             Self::Kimi => "MOONSHOT_API_KEY",
+            Self::Claude => "CLAUDE_API_KEY",
         }
     }
 
@@ -78,15 +84,22 @@ impl Model {
             Self::OpenAi | Self::DeepSeek => Some(128_000),
             Self::Qwen => Some(1_000_000),
             Self::Kimi => Some(256_000),
+            Self::Claude => Some(200_000),
         }
     }
 
     pub const fn supported() -> &'static [&'static str] {
-        &["openai", "deepseek", "qwen", "kimi"]
+        &["openai", "deepseek", "qwen", "kimi", "claude"]
     }
 
     pub const fn all() -> &'static [Self] {
-        &[Self::OpenAi, Self::DeepSeek, Self::Qwen, Self::Kimi]
+        &[
+            Self::OpenAi,
+            Self::DeepSeek,
+            Self::Qwen,
+            Self::Kimi,
+            Self::Claude,
+        ]
     }
 }
 
@@ -105,6 +118,7 @@ impl FromStr for Model {
             "deepseek" | "deep-seek" => Ok(Self::DeepSeek),
             "qwen" | "dashscope" => Ok(Self::Qwen),
             "kimi" | "moonshot" => Ok(Self::Kimi),
+            "claude" | "anthropic" => Ok(Self::Claude),
             unsupported => Err(format!(
                 "unsupported model '{unsupported}'; supported models: {}",
                 Self::supported().join(", ")
@@ -351,7 +365,10 @@ mod tests {
         assert!(!kimi.supports_custom_temperature());
         assert!(qwen.supports_custom_temperature());
 
-        assert_eq!(Model::supported(), &["openai", "deepseek", "qwen", "kimi"]);
+        assert_eq!(
+            Model::supported(),
+            &["openai", "deepseek", "qwen", "kimi", "claude"]
+        );
     }
 
     #[test]

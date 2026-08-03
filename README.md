@@ -77,7 +77,7 @@ noya
 
 When running from a source checkout, use `cargo run --` before Noya's arguments. For example, `noya login deepseek` becomes `cargo run -- login deepseek`, while a bare `noya` becomes `cargo run`.
 
-Noya currently supports `openai`, `deepseek`, `qwen`, and `kimi`:
+Noya currently supports `openai`, `deepseek`, `qwen`, `kimi`, and `claude` through OpenAI-compatible gateways:
 
 ```bash
 noya login openai
@@ -97,6 +97,7 @@ openai    gpt-4o              not logged in
 deepseek  deepseek-v4-flash   not logged in
 qwen      qwen3-coder-plus    active
 kimi      kimi-k3             not logged in
+claude    claude-sonnet-4     not logged in
 ```
 
 Default model configuration:
@@ -106,11 +107,14 @@ Default model configuration:
 | `openai` | `https://api.openai.com/v1` | `gpt-4o` | `OPENAI_API_KEY` |
 | `deepseek` | `https://api.deepseek.com` | `deepseek-v4-flash` | `DEEPSEEK_API_KEY` |
 | `qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3-coder-plus` | `DASHSCOPE_API_KEY` |
+| `claude` | `https://openrouter.ai/api/v1` | `claude-sonnet-4` | `CLAUDE_API_KEY` |
 | `kimi` | `https://api.moonshot.cn/v1` | `kimi-k3` | `MOONSHOT_API_KEY` |
 
 Credentials are stored in `~/.noya/credentials.json` under the current user's home directory. Set `NOYA_CONFIG_DIR` to use another credentials directory. The exact path is printed after a successful login. On Unix, the directory uses mode `0700` and the file uses mode `0600`. The environment variables above can also provide temporary credentials.
 
 Each provider can optionally override its OpenAI-compatible endpoint and model ID. Omitted values use Noya's built-in defaults:
+
+Claude uses an OpenAI-compatible gateway, not the native Anthropic Messages API. Set `base_url` to your gateway and use the gateway-issued API key.
 
 ```json
 {
