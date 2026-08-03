@@ -453,11 +453,11 @@ impl App {
         self.mode = AppMode::ConfiguringModel;
         self.model_setup = Some(ModelSetup {
             model,
-            base_url: base_url.clone(),
+            base_url,
             step: ModelSetupStep::BaseUrl,
         });
-        self.input = base_url;
-        self.cursor_position = self.input.len();
+        self.input.clear();
+        self.cursor_position = 0;
         self.command_menu_dismissed = true;
         self.agent_state = AgentState::Idle;
         self.status_message = None;
@@ -877,7 +877,10 @@ mod tests {
             app.model_setup_prompt(),
             Some("Base URL (Enter to accept):")
         );
+        assert!(app.input.is_empty());
 
+        app.input = "https://gateway.example/v1".to_string();
+        app.cursor_position = app.input.len();
         assert_eq!(app.submit_model_setup_input(), TuiAction::None);
         assert_eq!(app.model_setup_prompt(), Some("API key (hidden):"));
         app.input = "sk-test".to_string();
@@ -887,7 +890,7 @@ mod tests {
             app.submit_model_setup_input(),
             TuiAction::ConfigureModel {
                 model: "openai".to_string(),
-                base_url: "https://api.openai.com/v1".to_string(),
+                base_url: "https://gateway.example/v1".to_string(),
                 api_key: "sk-test".to_string(),
             }
         );
