@@ -61,6 +61,7 @@ impl LlmClient {
         tools: Vec<ToolDefinition>,
         temperature: f32,
     ) -> Result<ChatResponse> {
+        self.ensure_api_key()?;
         let response = self
             .http
             .post(format!("{}/chat/completions", self.base_url))
@@ -96,6 +97,7 @@ impl LlmClient {
     where
         F: FnMut(LlmEvent),
     {
+        self.ensure_api_key()?;
         let response = self
             .http
             .post(format!("{}/chat/completions", self.base_url))
@@ -183,6 +185,15 @@ impl LlmClient {
     {
         let response = self.complete(messages, tools, temperature).await?;
         response_from_complete(response, &mut emit)
+    }
+
+    fn ensure_api_key(&self) -> Result<()> {
+        if self.api_key.trim().is_empty() {
+            bail!(
+                "no API credential configured; run `noya login <model>` or set the provider API key environment variable"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -303,6 +314,24 @@ mod tests {
             response.tool_calls[0].function.arguments,
             "{\"path\":\"README.md\"}"
         );
+    }
+
+    #[tokio::test]
+    async fn missing_api_key_fails_at_request_time_without_contacting_the_endpoint() {
+        let client = LlmClient::with_client(
+            Client::builder().no_proxy().build().unwrap(),
+            "http://127.0.0.1:1",
+            "",
+            "test-model",
+        );
+
+        let error = client
+            .complete_stream(Vec::new(), Vec::new(), 0.2, |_| {})
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("no API credential configured"));
     }
 
     #[test]

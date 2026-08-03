@@ -62,6 +62,11 @@ enum AgentCommand {
     NewSession,
     ListModels,
     SwitchModel(String),
+    ConfigureModel {
+        model: String,
+        base_url: String,
+        api_key: String,
+    },
     ListSessions,
     ResumeSession(String),
     RenameSession(String),
@@ -86,6 +91,10 @@ enum HostEvent {
     },
     SessionList(Vec<SessionSummary>),
     ModelChoices(Vec<ModelChoice>),
+    ModelSetupRequired {
+        model: Model,
+        base_url: String,
+    },
     RetrySubmitted(String),
     Notice(String),
     CommandFailed(String),
@@ -205,6 +214,9 @@ async fn run_loop(terminal: &mut NoyaTerminal, agent: Agent, info: AppInfo) -> R
                     HostEvent::ModelChoices(choices) => {
                         app.open_model_menu(choices);
                     }
+                    HostEvent::ModelSetupRequired { model, base_url } => {
+                        app.begin_model_setup(model.id().to_string(), base_url);
+                    }
                     HostEvent::RetrySubmitted(input) => {
                         app.add_message(app::Message::new(app::MessageKind::User, input));
                         app.agent_state = app::AgentState::Thinking;
@@ -263,6 +275,17 @@ fn apply_action(
         }
         TuiAction::SwitchModel(model) => {
             let _ = command_tx.send(AgentCommand::SwitchModel(model));
+        }
+        TuiAction::ConfigureModel {
+            model,
+            base_url,
+            api_key,
+        } => {
+            let _ = command_tx.send(AgentCommand::ConfigureModel {
+                model,
+                base_url,
+                api_key,
+            });
         }
         TuiAction::ListSessions => {
             let _ = command_tx.send(AgentCommand::ListSessions);
@@ -505,6 +528,7 @@ fn spawn_agent_host(
                                 | Some(AgentCommand::Reset)
                                 | Some(AgentCommand::NewSession)
                                 | Some(AgentCommand::SwitchModel(_))
+                                | Some(AgentCommand::ConfigureModel { .. })
                                 | Some(AgentCommand::ResumeSession(_))
                                 | Some(AgentCommand::RenameSession(_))
                                 | Some(AgentCommand::Retry)
@@ -554,6 +578,37 @@ fn spawn_agent_host(
                     send_model_choices(&event_tx, &model_store, &agent.session_summary());
                 }
                 AgentCommand::SwitchModel(name) => {
+                    let requested = match name.parse::<Model>() {
+                        Ok(model) => model,
+                        Err(error) => {
+                            let _ = event_tx.send(HostEvent::CommandFailed(format!(
+                                "Failed to switch model: {error}"
+                            )));
+                            continue;
+                        }
+                    };
+                    match RuntimeModelConfig::resolve(
+                        ModelOverrides {
+                            model: Some(requested),
+                            ..ModelOverrides::default()
+                        },
+                        &model_store,
+                    ) {
+                        Ok(config) if config.api_key.is_empty() => {
+                            let _ = event_tx.send(HostEvent::ModelSetupRequired {
+                                model: requested,
+                                base_url: config.base_url,
+                            });
+                            continue;
+                        }
+                        Err(error) => {
+                            let _ = event_tx.send(HostEvent::CommandFailed(format!(
+                                "Failed to switch model: {error}"
+                            )));
+                            continue;
+                        }
+                        Ok(_) => {}
+                    }
                     match switch_model(&mut agent, &model_store, &name) {
                         Ok(message) => {
                             let _ = event_tx.send(session_updated(&agent));
@@ -562,6 +617,45 @@ fn spawn_agent_host(
                         Err(error) => {
                             let _ = event_tx.send(HostEvent::CommandFailed(format!(
                                 "Failed to switch model: {error}"
+                            )));
+                        }
+                    }
+                }
+                AgentCommand::ConfigureModel {
+                    model,
+                    base_url,
+                    api_key,
+                } => {
+                    let result = (|| -> Result<String> {
+                        let model = model.parse::<Model>().map_err(anyhow::Error::msg)?;
+                        model_store.login(model, &api_key, Some(&base_url))?;
+                        let config = RuntimeModelConfig::resolve(
+                            ModelOverrides {
+                                model: Some(model),
+                                ..ModelOverrides::default()
+                            },
+                            &model_store,
+                        )?;
+                        let llm = LlmClient::new(
+                            config.base_url.clone(),
+                            config.api_key.clone(),
+                            config.model_id.clone(),
+                        )
+                        .with_custom_temperature(config.model.supports_custom_temperature());
+                        agent.switch_model(config.model.to_string(), llm)?;
+                        Ok(format!(
+                            "Configured and switched to {} ({}).",
+                            config.model, config.model_id
+                        ))
+                    })();
+                    match result {
+                        Ok(message) => {
+                            let _ = event_tx.send(session_updated(&agent));
+                            let _ = event_tx.send(HostEvent::Notice(message));
+                        }
+                        Err(error) => {
+                            let _ = event_tx.send(HostEvent::CommandFailed(format!(
+                                "Failed to configure model: {error}"
                             )));
                         }
                     }
@@ -717,7 +811,7 @@ fn logged_in_model_choices(
 ) -> Vec<ModelChoice> {
     statuses
         .iter()
-        .filter(|status| status.logged_in)
+        .filter(|status| status.logged_in || status.model.id() == current_model)
         .map(|status| {
             let current = current_model == status.model.id();
             ModelChoice {
@@ -823,5 +917,30 @@ mod tests {
         assert_eq!(choices[1].model, "qwen");
         assert_eq!(choices[1].model_id, "qwen-custom");
         assert!(choices[1].current);
+    }
+
+    #[test]
+    fn model_choices_include_the_current_model_without_a_saved_credential() {
+        let choices = logged_in_model_choices(
+            &[
+                ModelStatus {
+                    model: Model::OpenAi,
+                    logged_in: false,
+                    active: false,
+                },
+                ModelStatus {
+                    model: Model::DeepSeek,
+                    logged_in: false,
+                    active: false,
+                },
+            ],
+            "openai",
+            "gpt-4o",
+        );
+
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].model, "openai");
+        assert_eq!(choices[0].model_id, "gpt-4o");
+        assert!(choices[0].current);
     }
 }

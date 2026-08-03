@@ -81,6 +81,17 @@ pub fn handle_key_event(key: KeyEvent, app: &mut App) -> TuiAction {
         };
     }
 
+    if app.mode == crate::tui::app::AppMode::ConfiguringModel {
+        return match key.code {
+            KeyCode::Enter => app.submit_model_setup_input(),
+            KeyCode::Esc => {
+                app.cancel_model_setup();
+                TuiAction::None
+            }
+            _ => handle_editing_key(key, app),
+        };
+    }
+
     if app.mode == crate::tui::app::AppMode::SelectingModel {
         return match key.code {
             KeyCode::Up => {
@@ -148,6 +159,48 @@ pub fn handle_key_event(key: KeyEvent, app: &mut App) -> TuiAction {
             app.input.insert(app.cursor_position, character);
             app.cursor_position += character.len_utf8();
             app.input_changed();
+            TuiAction::None
+        }
+        _ => TuiAction::None,
+    }
+}
+
+fn handle_editing_key(key: KeyEvent, app: &mut App) -> TuiAction {
+    match key.code {
+        KeyCode::Backspace => {
+            if app.cursor_position > 0 {
+                let start = prev_char_boundary(&app.input, app.cursor_position);
+                app.input.replace_range(start..app.cursor_position, "");
+                app.cursor_position = start;
+            }
+            TuiAction::None
+        }
+        KeyCode::Delete => {
+            if app.cursor_position < app.input.len() {
+                let end = next_char_boundary(&app.input, app.cursor_position);
+                app.input.replace_range(app.cursor_position..end, "");
+            }
+            TuiAction::None
+        }
+        KeyCode::Left => {
+            app.cursor_position = prev_char_boundary(&app.input, app.cursor_position);
+            TuiAction::None
+        }
+        KeyCode::Right => {
+            app.cursor_position = next_char_boundary(&app.input, app.cursor_position);
+            TuiAction::None
+        }
+        KeyCode::Home => {
+            app.cursor_position = 0;
+            TuiAction::None
+        }
+        KeyCode::End => {
+            app.cursor_position = app.input.len();
+            TuiAction::None
+        }
+        KeyCode::Char(character) => {
+            app.input.insert(app.cursor_position, character);
+            app.cursor_position += character.len_utf8();
             TuiAction::None
         }
         _ => TuiAction::None,

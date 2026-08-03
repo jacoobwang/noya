@@ -124,6 +124,10 @@ struct Credentials {
 #[derive(Serialize, Deserialize)]
 struct ModelCredential {
     api_key: String,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    model_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,18 +161,27 @@ impl CredentialStore {
         &self.path
     }
 
-    pub fn login(&self, model: Model, api_key: &str) -> Result<()> {
+    pub fn login(&self, model: Model, api_key: &str, base_url: Option<&str>) -> Result<()> {
         let api_key = api_key.trim();
         if api_key.is_empty() {
             bail!("API key cannot be empty");
         }
+        let base_url = base_url.map(str::trim).filter(|value| !value.is_empty());
         let mut credentials = self.load()?;
-        credentials.models.insert(
-            model.id().to_string(),
-            ModelCredential {
+        credentials
+            .models
+            .entry(model.id().to_string())
+            .and_modify(|credential| {
+                credential.api_key = api_key.to_string();
+                if let Some(base_url) = base_url {
+                    credential.base_url = Some(base_url.to_string());
+                }
+            })
+            .or_insert_with(|| ModelCredential {
                 api_key: api_key.to_string(),
-            },
-        );
+                base_url: base_url.map(str::to_string),
+                model_id: None,
+            });
         credentials.active_model = Some(model);
         self.save(&credentials)
     }
@@ -195,6 +208,22 @@ impl CredentialStore {
             .models
             .get(model.id())
             .map(|credential| credential.api_key.clone()))
+    }
+
+    pub fn base_url(&self, model: Model) -> Result<Option<String>> {
+        Ok(self
+            .load()?
+            .models
+            .get(model.id())
+            .and_then(|credential| credential.base_url.clone()))
+    }
+
+    fn model_id(&self, model: Model) -> Result<Option<String>> {
+        Ok(self
+            .load()?
+            .models
+            .get(model.id())
+            .and_then(|credential| credential.model_id.clone()))
     }
 
     pub fn model_statuses(&self) -> Result<Vec<ModelStatus>> {
@@ -274,20 +303,17 @@ impl RuntimeModelConfig {
             .filter(|value| !value.trim().is_empty())
             .or_else(|| std::env::var(model.api_key_env()).ok())
             .or(store.api_key(model)?)
-            .with_context(|| {
-                format!(
-                    "no credential for {model}; run `noya login {model}` or set {}",
-                    model.api_key_env()
-                )
-            })?;
+            .unwrap_or_default();
         Ok(Self {
             model,
             api_key,
             base_url: overrides
                 .base_url
+                .or(store.base_url(model)?)
                 .unwrap_or_else(|| model.base_url().to_string()),
             model_id: overrides
                 .model_id
+                .or(store.model_id(model)?)
                 .unwrap_or_else(|| model.default_model_id().to_string()),
         })
     }
@@ -333,11 +359,23 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = CredentialStore::at(directory.path().join("credentials.json"));
 
-        store.login(Model::DeepSeek, "secret-key").unwrap();
+        store.login(Model::DeepSeek, "secret-key", None).unwrap();
         assert_eq!(store.active_model().unwrap(), Some(Model::DeepSeek));
         assert_eq!(
             store.api_key(Model::DeepSeek).unwrap().as_deref(),
             Some("secret-key")
+        );
+
+        store
+            .login(
+                Model::DeepSeek,
+                "updated-key",
+                Some("https://gateway.example/v1"),
+            )
+            .unwrap();
+        assert_eq!(
+            store.base_url(Model::DeepSeek).unwrap().as_deref(),
+            Some("https://gateway.example/v1")
         );
 
         assert!(store.logout(Model::DeepSeek).unwrap());
@@ -367,7 +405,7 @@ mod tests {
     fn runtime_config_uses_active_login_and_allows_explicit_overrides() {
         let directory = tempfile::tempdir().unwrap();
         let store = CredentialStore::at(directory.path().join("credentials.json"));
-        store.login(Model::DeepSeek, "stored-key").unwrap();
+        store.login(Model::DeepSeek, "stored-key", None).unwrap();
 
         let configured = RuntimeModelConfig::resolve(ModelOverrides::default(), &store).unwrap();
         assert_eq!(configured.model, Model::DeepSeek);
@@ -391,6 +429,43 @@ mod tests {
     }
 
     #[test]
+    fn runtime_config_allows_startup_without_a_saved_credential() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = CredentialStore::at(directory.path().join("credentials.json"));
+
+        let configured = RuntimeModelConfig::resolve(ModelOverrides::default(), &store).unwrap();
+
+        assert_eq!(configured.model, Model::OpenAi);
+        assert!(configured.api_key.is_empty());
+    }
+
+    #[test]
+    fn runtime_config_uses_provider_specific_endpoint_and_model_from_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("credentials.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "active_model": "deepseek",
+                "models": {
+                    "deepseek": {
+                        "api_key": "stored-key",
+                        "base_url": "https://gateway.example/v1",
+                        "model_id": "deepseek-custom"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let store = CredentialStore::at(path);
+
+        let configured = RuntimeModelConfig::resolve(ModelOverrides::default(), &store).unwrap();
+        assert_eq!(configured.api_key, "stored-key");
+        assert_eq!(configured.base_url, "https://gateway.example/v1");
+        assert_eq!(configured.model_id, "deepseek-custom");
+    }
+
+    #[test]
     fn discovered_credentials_live_under_the_user_home_directory() {
         let store = CredentialStore::discover().unwrap();
         let expected = dirs::home_dir().unwrap().join("noya/credentials.json");
@@ -406,7 +481,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("credentials.json");
         let store = CredentialStore::at(&path);
-        store.login(Model::DeepSeek, "secret-key").unwrap();
+        store.login(Model::DeepSeek, "secret-key", None).unwrap();
 
         let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);

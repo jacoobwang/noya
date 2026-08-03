@@ -67,6 +67,8 @@ noya
 noya --workspace /path/to/repo
 ```
 
+执行 `noya login <model>` 时会先设置 provider 的 `base_url`，再隐藏输入 API key。地址提示处直接回车会保留已有地址或使用内置默认值；输入自定义 OpenAI 兼容接口地址后会保存到该 provider 的配置中。
+
 `login` 会把该 model 设为当前活动 model；之后启动时不需要再次指定。`--workspace` 也可以省略，默认使用当前目录：
 
 ```bash
@@ -107,6 +109,28 @@ kimi      kimi-k3             not logged in
 | `kimi` | `https://api.moonshot.cn/v1` | `kimi-k3` | `MOONSHOT_API_KEY` |
 
 凭证保存在当前用户 home 目录下的 `~/.noya/credentials.json` 中。设置 `NOYA_CONFIG_DIR` 可以使用其他凭证目录。实际路径会在登录成功后输出；Unix 下目录权限为 `0700`，文件权限为 `0600`。也可以用上表中的环境变量临时提供凭证。
+
+每个 provider 都可以单独配置 OpenAI 兼容接口地址和模型 ID；省略时使用 Noya 内置默认值：
+
+```json
+{
+  "active_model": "deepseek",
+  "models": {
+    "openai": {
+      "api_key": "sk-...",
+      "base_url": "https://api.openai.com/v1",
+      "model_id": "gpt-4o"
+    },
+    "deepseek": {
+      "api_key": "sk-...",
+      "base_url": "https://gateway.example/v1",
+      "model_id": "deepseek-custom"
+    }
+  }
+}
+```
+
+优先级为：命令行参数 > provider 配置 > 内置默认值。执行 `noya login <model>` 只会更新该 provider 的 API key，不会覆盖已配置的接口地址和模型 ID。
 
 启动后进入 inline TUI，欢迎区会显示当前 Noya 版本、活动 model、实际 Model ID 和 workspace 目录。输入 `/` 打开命令菜单，使用 ↑/↓ 选择命令，Enter 应用命令，Tab 只补全而不执行，Esc 关闭菜单。已经发送的用户消息右对齐，Agent 输出左对齐；Agent 回复会边生成、边渲染 Markdown、边写入终端原生 scrollback，不需要等待回答结束才能查看完整输出。支持标题、强调、行内代码、代码块、列表、引用和链接；`/status` 会显示当前 model 和实际 Model ID。
 

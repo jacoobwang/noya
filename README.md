@@ -67,6 +67,8 @@ noya
 noya --workspace /path/to/repo
 ```
 
+`noya login <model>` first asks for the provider's `base_url` and then prompts for the API key. Press Enter at the URL prompt to keep the existing value or use the built-in default; enter a custom OpenAI-compatible endpoint to save it for that provider.
+
 `login` makes the selected model active, so it does not need to be specified on subsequent runs. `--workspace` is optional and defaults to the current directory:
 
 ```bash
@@ -107,6 +109,28 @@ Default model configuration:
 | `kimi` | `https://api.moonshot.cn/v1` | `kimi-k3` | `MOONSHOT_API_KEY` |
 
 Credentials are stored in `~/.noya/credentials.json` under the current user's home directory. Set `NOYA_CONFIG_DIR` to use another credentials directory. The exact path is printed after a successful login. On Unix, the directory uses mode `0700` and the file uses mode `0600`. The environment variables above can also provide temporary credentials.
+
+Each provider can optionally override its OpenAI-compatible endpoint and model ID. Omitted values use Noya's built-in defaults:
+
+```json
+{
+  "active_model": "deepseek",
+  "models": {
+    "openai": {
+      "api_key": "sk-...",
+      "base_url": "https://api.openai.com/v1",
+      "model_id": "gpt-4o"
+    },
+    "deepseek": {
+      "api_key": "sk-...",
+      "base_url": "https://gateway.example/v1",
+      "model_id": "deepseek-custom"
+    }
+  }
+}
+```
+
+Command-line options take precedence over provider settings, which take precedence over built-in defaults. Running `noya login <model>` updates only that provider's API key and preserves its configured endpoint and model ID.
 
 Noya starts in an inline TUI with a welcome header showing the installed version, active model and Model ID, and workspace directory. Type `/` to open the command menu, use ↑/↓ to select a command, Enter to apply it, Tab to complete it without running, and Esc to close the menu. Sent user messages are right-aligned and Agent output is left-aligned. Agent responses are streamed, rendered as Markdown, and written to native terminal scrollback while generation is still in progress. Supported Markdown includes headings, emphasis, inline code, code blocks, lists, blockquotes, and links. `/status` displays the active model and concrete Model ID.
 

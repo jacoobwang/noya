@@ -6,7 +6,7 @@ use noya::{
     session::{CreateSession, ExportFormat, SessionFilter, SessionManager, SessionSummary},
     tui,
 };
-use std::path::PathBuf;
+use std::{io, io::Write, path::PathBuf};
 
 #[derive(Parser)]
 #[command(name = "noya", about = "A coding agent for repository tasks")]
@@ -125,14 +125,31 @@ pub async fn run(mut cli: Cli) -> Result<()> {
 }
 
 fn login(model: Model, store: &CredentialStore) -> Result<()> {
+    let default_base_url = store
+        .base_url(model)?
+        .unwrap_or_else(|| model.base_url().to_string());
+    let base_url = prompt_base_url(&default_base_url)?;
     let api_key = rpassword::prompt_password(format!("{}: ", model.api_key_label()))
         .context("read API key")?;
-    store.login(model, &api_key)?;
+    store.login(model, &api_key, Some(&base_url))?;
     println!(
         "Logged in to {model}. Credential saved to {}.",
         store.path().display()
     );
     Ok(())
+}
+
+fn prompt_base_url(default_base_url: &str) -> Result<String> {
+    print!("Base URL [{default_base_url}]: ");
+    io::stdout().flush().context("flush base URL prompt")?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).context("read base URL")?;
+    let base_url = input.trim();
+    Ok(if base_url.is_empty() {
+        default_base_url.to_string()
+    } else {
+        base_url.to_string()
+    })
 }
 
 fn logout(model: Option<Model>, store: &CredentialStore) -> Result<()> {

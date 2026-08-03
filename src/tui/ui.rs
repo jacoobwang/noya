@@ -499,12 +499,23 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     );
     let prompt_width = UnicodeWidthStr::width(INPUT_PROMPT);
     let available = usize::from(inner.width).saturating_sub(prompt_width);
-    let (visible, cursor_column) = visible_input(&app.input, app.cursor_position, available);
+    let rendered_input = if app.model_setup_is_secret() {
+        "•".repeat(app.input.chars().count())
+    } else {
+        app.input.clone()
+    };
+    let (visible, cursor_column) = visible_input(&rendered_input, app.cursor_position, available);
     let text = if app.mode == AppMode::SelectingModel {
         Span::styled(
             "Select a model with ↑/↓ and Enter.",
             Style::default().fg(Color::DarkGray),
         )
+    } else if let Some(prompt) = app.model_setup_prompt() {
+        if visible.is_empty() {
+            Span::styled(prompt, Style::default().fg(Color::DarkGray))
+        } else {
+            Span::raw(visible)
+        }
     } else if visible.is_empty() {
         Span::styled(
             "Type a request. /help for commands.",

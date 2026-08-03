@@ -67,6 +67,20 @@ pub enum AppMode {
     Normal,
     Confirming,
     SelectingModel,
+    ConfiguringModel,
+}
+
+#[derive(Debug, Clone)]
+struct ModelSetup {
+    model: String,
+    base_url: String,
+    step: ModelSetupStep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelSetupStep {
+    BaseUrl,
+    ApiKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +99,11 @@ pub enum TuiAction {
     NewSession,
     ListModels,
     SwitchModel(String),
+    ConfigureModel {
+        model: String,
+        base_url: String,
+        api_key: String,
+    },
     ListSessions,
     ResumeSession(String),
     RenameSession(String),
@@ -113,6 +132,7 @@ pub struct App {
     pub session_log_path: Option<PathBuf>,
     pub context_tokens: usize,
     command_menu_dismissed: bool,
+    model_setup: Option<ModelSetup>,
 }
 
 impl App {
@@ -135,6 +155,7 @@ impl App {
             session_log_path: None,
             context_tokens: 0,
             command_menu_dismissed: false,
+            model_setup: None,
         }
     }
 
@@ -428,6 +449,80 @@ impl App {
         self.model_selection = 0;
     }
 
+    pub fn begin_model_setup(&mut self, model: String, base_url: String) {
+        self.mode = AppMode::ConfiguringModel;
+        self.model_setup = Some(ModelSetup {
+            model,
+            base_url: base_url.clone(),
+            step: ModelSetupStep::BaseUrl,
+        });
+        self.input = base_url;
+        self.cursor_position = self.input.len();
+        self.command_menu_dismissed = true;
+        self.agent_state = AgentState::Idle;
+        self.status_message = None;
+    }
+
+    pub fn model_setup_prompt(&self) -> Option<&'static str> {
+        match self.model_setup.as_ref()?.step {
+            ModelSetupStep::BaseUrl => Some("Base URL (Enter to accept):"),
+            ModelSetupStep::ApiKey => Some("API key (hidden):"),
+        }
+    }
+
+    pub fn model_setup_is_secret(&self) -> bool {
+        matches!(
+            self.model_setup.as_ref().map(|setup| setup.step),
+            Some(ModelSetupStep::ApiKey)
+        )
+    }
+
+    pub fn submit_model_setup_input(&mut self) -> TuiAction {
+        let Some(setup) = self.model_setup.as_mut() else {
+            return TuiAction::None;
+        };
+        let value = self.input.trim().to_string();
+        if value.is_empty() {
+            self.status_message = Some(match setup.step {
+                ModelSetupStep::BaseUrl => "Base URL cannot be empty.".to_string(),
+                ModelSetupStep::ApiKey => "API key cannot be empty.".to_string(),
+            });
+            return TuiAction::None;
+        }
+        match setup.step {
+            ModelSetupStep::BaseUrl => {
+                setup.base_url = value;
+                setup.step = ModelSetupStep::ApiKey;
+                self.input.clear();
+                self.cursor_position = 0;
+                self.status_message = None;
+                TuiAction::None
+            }
+            ModelSetupStep::ApiKey => {
+                let result = TuiAction::ConfigureModel {
+                    model: setup.model.clone(),
+                    base_url: setup.base_url.clone(),
+                    api_key: value,
+                };
+                self.model_setup = None;
+                self.mode = AppMode::Normal;
+                self.input.clear();
+                self.cursor_position = 0;
+                self.agent_state = AgentState::Thinking;
+                result
+            }
+        }
+    }
+
+    pub fn cancel_model_setup(&mut self) {
+        self.model_setup = None;
+        self.mode = AppMode::Normal;
+        self.input.clear();
+        self.cursor_position = 0;
+        self.agent_state = AgentState::Idle;
+        self.status_message = Some("Model setup cancelled.".to_string());
+    }
+
     fn selected_command(&self) -> Option<&'static SlashCommand> {
         let suggestions = self.command_suggestions();
         suggestions
@@ -453,7 +548,7 @@ impl App {
             "/help" => {
                 self.add_message(Message::new(
                     MessageKind::System,
-                    "Commands: /help /new /model [name] /sessions /resume <id> /rename <title> /retry /compact /clear /reset /status /cancel /quit",
+                    "Commands: /help /new /model [name] (choose or configure) /sessions /resume <id> /rename <title> /retry /compact /clear /reset /status /cancel /quit",
                 ));
                 TuiAction::None
             }
@@ -768,6 +863,35 @@ mod tests {
             TuiAction::None
         );
         assert!(app.status_message.as_deref().unwrap().contains("busy"));
+    }
+
+    #[test]
+    fn model_setup_collects_base_url_before_hidden_api_key() {
+        let mut app = app();
+        app.begin_model_setup(
+            "openai".to_string(),
+            "https://api.openai.com/v1".to_string(),
+        );
+        assert_eq!(app.mode, AppMode::ConfiguringModel);
+        assert_eq!(
+            app.model_setup_prompt(),
+            Some("Base URL (Enter to accept):")
+        );
+
+        assert_eq!(app.submit_model_setup_input(), TuiAction::None);
+        assert_eq!(app.model_setup_prompt(), Some("API key (hidden):"));
+        app.input = "sk-test".to_string();
+        app.cursor_position = app.input.len();
+
+        assert_eq!(
+            app.submit_model_setup_input(),
+            TuiAction::ConfigureModel {
+                model: "openai".to_string(),
+                base_url: "https://api.openai.com/v1".to_string(),
+                api_key: "sk-test".to_string(),
+            }
+        );
+        assert_eq!(app.mode, AppMode::Normal);
     }
 
     #[test]
