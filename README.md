@@ -237,7 +237,7 @@ git_diff     Show staged or unstaged changes, optionally for one path
 run_command  Run a non-interactive shell command in the workspace
 ```
 
-`code_navigation` uses a locally installed language server when available. Noya currently recognizes Rust, C/C++, Go, Python, TypeScript/JavaScript, Lua, and Bash. Servers are started lazily per workspace and language; the current `--workspace` is always used as the LSP root. Set a user-level override such as `NOYA_LSP_RUST=/custom/bin/rust-analyzer` when a server is not on `PATH`. `workspace_symbols` falls back to plain-text search when its language server is unavailable; definitions and references return an explicit LSP error instead of pretending text matches are semantic results.
+`code_navigation` uses a locally installed language server when available. Noya currently recognizes Rust, C/C++, Go, Python, TypeScript/JavaScript, Java, Lua, and Bash; Java uses Eclipse JDT Language Server (`jdtls`). Servers are started lazily per workspace and language; the current `--workspace` is always used as the LSP root. Set a user-level override such as `NOYA_LSP_RUST=/custom/bin/rust-analyzer` or `NOYA_LSP_JAVA=/custom/bin/jdtls` when a server is not on `PATH`. `workspace_symbols` falls back to plain-text search when its language server is unavailable; definitions and references return an explicit LSP error instead of pretending text matches are semantic results.
 
 ## Current Scope
 

@@ -427,6 +427,7 @@ fn server_command(language: &str) -> Result<ServerCommand> {
         "typescript" => ("typescript-language-server", vec!["--stdio"]),
         "lua" => ("lua-language-server", vec!["--stdio"]),
         "bash" => ("bash-language-server", vec!["start"]),
+        "java" => ("jdtls", vec![]),
         _ => bail!("unsupported language: {language}"),
     };
     let command = std::env::var(&env_name).ok();
@@ -454,6 +455,7 @@ fn language_for_path(path: &Path) -> Option<&'static str> {
         "ts" | "tsx" | "js" | "jsx" => Some("typescript"),
         "lua" => Some("lua"),
         "sh" | "bash" => Some("bash"),
+        "java" => Some("java"),
         _ => None,
     }
 }
@@ -571,6 +573,7 @@ mod tests {
             language_for_path(Path::new("src/main.ts")),
             Some("typescript")
         );
+        assert_eq!(language_for_path(Path::new("src/Main.java")), Some("java"));
         assert_eq!(language_for_path(Path::new("README.md")), None);
     }
 
