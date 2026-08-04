@@ -11,6 +11,7 @@ pub use protocol::{
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use reqwest::Client;
+use serde::Deserialize;
 use stream::{StreamAccumulator, decode_sse_data, find_event_boundary};
 
 #[derive(Clone)]
@@ -53,6 +54,39 @@ impl LlmClient {
 
     pub fn model_id(&self) -> &str {
         &self.model
+    }
+
+    pub async fn list_models(&self) -> Result<Vec<String>> {
+        self.ensure_api_key()?;
+        let response = self
+            .http
+            .get(format!("{}/models", self.base_url))
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .context("send model discovery request")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("read model discovery response")?;
+        if !status.is_success() {
+            bail!("LLM model discovery failed ({}): {}", status, body);
+        }
+        let payload: ModelListResponse =
+            serde_json::from_str(&body).context("decode model discovery response")?;
+        let mut models = payload
+            .data
+            .into_iter()
+            .map(|model| model.id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .collect::<Vec<_>>();
+        models.sort();
+        models.dedup();
+        if models.is_empty() {
+            bail!("LLM model discovery returned no model IDs");
+        }
+        Ok(models)
     }
 
     pub async fn complete(
@@ -197,6 +231,16 @@ impl LlmClient {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct ModelListResponse {
+    data: Vec<ModelListItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelListItem {
+    id: String,
+}
+
 fn response_from_complete<F>(response: ChatResponse, emit: &mut F) -> Result<ChatStreamResponse>
 where
     F: FnMut(LlmEvent),
@@ -224,7 +268,7 @@ mod tests {
         Router,
         body::Body,
         http::{Response, header::CONTENT_TYPE},
-        routing::post,
+        routing::{get, post},
     };
 
     async fn stream_response() -> Response<Body> {
@@ -264,6 +308,15 @@ mod tests {
             .header(CONTENT_TYPE, "text/event-stream")
             .body(Body::from(
                 "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            ))
+            .unwrap()
+    }
+
+    async fn models_response() -> Response<Body> {
+        Response::builder()
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"data":[{"id":"z-model"},{"id":"a-model"},{"id":"z-model"}]}"#,
             ))
             .unwrap()
     }
@@ -314,6 +367,28 @@ mod tests {
             response.tool_calls[0].function.arguments,
             "{\"path\":\"README.md\"}"
         );
+    }
+
+    #[tokio::test]
+    async fn list_models_reads_and_normalizes_openai_compatible_catalog() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/models", get(models_response)),
+            )
+            .await
+            .unwrap();
+        });
+        let client = LlmClient::with_client(
+            Client::builder().no_proxy().build().unwrap(),
+            format!("http://{address}/"),
+            "test-key",
+            "",
+        );
+
+        assert_eq!(client.list_models().await.unwrap(), ["a-model", "z-model"]);
     }
 
     #[tokio::test]

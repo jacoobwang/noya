@@ -11,10 +11,12 @@ use app::{App, ModelChoice, TuiAction};
 
 use crate::{
     Agent, AgentEvent, ApprovalPrompt, LlmClient, TurnControl,
-    model::{CredentialStore, Model, ModelOverrides, ModelStatus, RuntimeModelConfig},
+    model::{
+        CredentialStore, Model, ModelCatalogStore, ModelOverrides, ModelStatus, RuntimeModelConfig,
+    },
     session::{CreateSession, SessionFilter, SessionManager, SessionSummary, Transcript},
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use crossterm::terminal;
 use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend};
 use std::{
@@ -62,10 +64,25 @@ enum AgentCommand {
     NewSession,
     ListModels,
     SwitchModel(String),
+    SwitchModelTo {
+        model: String,
+        model_id: String,
+    },
+    FetchModelChoices {
+        model: String,
+        base_url: String,
+        api_key: String,
+    },
+    CatalogDiscovered {
+        provider: Model,
+        base_url: String,
+        model_ids: Vec<String>,
+    },
     ConfigureModel {
         model: String,
         base_url: String,
         api_key: String,
+        model_id: String,
     },
     ListSessions,
     ResumeSession(String),
@@ -94,6 +111,12 @@ enum HostEvent {
     ModelSetupRequired {
         model: Model,
         base_url: String,
+    },
+    ModelSetupChoices {
+        model: String,
+        base_url: String,
+        api_key: String,
+        model_ids: Vec<String>,
     },
     RetrySubmitted(String),
     Notice(String),
@@ -162,6 +185,7 @@ async fn run_loop(terminal: &mut NoyaTerminal, agent: Agent, info: AppInfo) -> R
         agent,
         SessionManager::discover()?,
         CredentialStore::discover()?,
+        ModelCatalogStore::discover()?,
     );
     let mut approval_response: Option<(String, oneshot::Sender<crate::ApprovalDecision>)> = None;
 
@@ -217,6 +241,9 @@ async fn run_loop(terminal: &mut NoyaTerminal, agent: Agent, info: AppInfo) -> R
                     HostEvent::ModelSetupRequired { model, base_url } => {
                         app.begin_model_setup(model.id().to_string(), base_url);
                     }
+                    HostEvent::ModelSetupChoices { model, base_url, api_key, model_ids } => {
+                        app.begin_model_selection(model, base_url, api_key, model_ids);
+                    }
                     HostEvent::RetrySubmitted(input) => {
                         app.add_message(app::Message::new(app::MessageKind::User, input));
                         app.agent_state = app::AgentState::Thinking;
@@ -226,6 +253,9 @@ async fn run_loop(terminal: &mut NoyaTerminal, agent: Agent, info: AppInfo) -> R
                         app.agent_state = app::AgentState::Idle;
                     }
                     HostEvent::CommandFailed(message) => {
+                        if app.mode == app::AppMode::ConfiguringModel {
+                            app.cancel_model_setup();
+                        }
                         app.add_message(app::Message::new(app::MessageKind::Error, message));
                         app.agent_state = app::AgentState::Idle;
                     }
@@ -276,15 +306,31 @@ fn apply_action(
         TuiAction::SwitchModel(model) => {
             let _ = command_tx.send(AgentCommand::SwitchModel(model));
         }
+        TuiAction::SwitchModelTo { model, model_id } => {
+            let _ = command_tx.send(AgentCommand::SwitchModelTo { model, model_id });
+        }
+        TuiAction::FetchModelChoices {
+            model,
+            base_url,
+            api_key,
+        } => {
+            let _ = command_tx.send(AgentCommand::FetchModelChoices {
+                model,
+                base_url,
+                api_key,
+            });
+        }
         TuiAction::ConfigureModel {
             model,
             base_url,
             api_key,
+            model_id,
         } => {
             let _ = command_tx.send(AgentCommand::ConfigureModel {
                 model,
                 base_url,
                 api_key,
+                model_id,
             });
         }
         TuiAction::ListSessions => {
@@ -422,10 +468,48 @@ fn spawn_agent_host(
     mut agent: Agent,
     manager: SessionManager,
     model_store: CredentialStore,
+    catalog_store: ModelCatalogStore,
 ) -> AgentHost {
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (approval_tx, approval_rx) = mpsc::unbounded_channel();
+
+    let discovery_tx = command_tx.clone();
+    let deferred_tx = command_tx.clone();
+    let discovery_store = model_store.clone();
+    tokio::spawn(async move {
+        for provider in Model::all().iter().copied() {
+            let Ok(config) = RuntimeModelConfig::resolve(
+                ModelOverrides {
+                    model: Some(provider),
+                    ..ModelOverrides::default()
+                },
+                &discovery_store,
+            ) else {
+                continue;
+            };
+            if config.api_key.trim().is_empty() || config.base_url.trim().is_empty() {
+                continue;
+            }
+            let client = LlmClient::new(config.base_url.clone(), config.api_key, config.model_id);
+            match client.list_models().await {
+                Ok(model_ids) => {
+                    let _ = discovery_tx.send(AgentCommand::CatalogDiscovered {
+                        provider,
+                        base_url: config.base_url,
+                        model_ids,
+                    });
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        ?provider,
+                        ?error,
+                        "model discovery failed; using cached catalog"
+                    );
+                }
+            }
+        }
+    });
 
     tokio::spawn(async move {
         while let Some(command) = command_rx.recv().await {
@@ -528,6 +612,8 @@ fn spawn_agent_host(
                                 | Some(AgentCommand::Reset)
                                 | Some(AgentCommand::NewSession)
                                 | Some(AgentCommand::SwitchModel(_))
+                                | Some(AgentCommand::SwitchModelTo { .. })
+                                | Some(AgentCommand::FetchModelChoices { .. })
                                 | Some(AgentCommand::ConfigureModel { .. })
                                 | Some(AgentCommand::ResumeSession(_))
                                 | Some(AgentCommand::RenameSession(_))
@@ -535,13 +621,24 @@ fn spawn_agent_host(
                                 | Some(AgentCommand::Compact) => {
                                     send_host_error(&event_tx, "Agent is busy");
                                 }
+                                Some(AgentCommand::CatalogDiscovered {
+                                    provider,
+                                    base_url,
+                                    model_ids,
+                                }) => {
+                                    let _ = deferred_tx.send(AgentCommand::CatalogDiscovered {
+                                        provider,
+                                        base_url,
+                                        model_ids,
+                                    });
+                                }
                                 Some(AgentCommand::ListSessions) => send_session_list_for_workspace(
                                     &event_tx,
                                     &manager,
                                     active_workspace.clone(),
                                 ),
                                 Some(AgentCommand::ListModels) => {
-                                    send_model_choices(&event_tx, &model_store, &active_summary)
+                                    send_model_choices(&event_tx, &model_store, &catalog_store, &active_summary)
                                 }
                             }
                         }
@@ -575,8 +672,64 @@ fn spawn_agent_host(
                     }
                 }
                 AgentCommand::ListModels => {
-                    send_model_choices(&event_tx, &model_store, &agent.session_summary());
+                    send_model_choices(
+                        &event_tx,
+                        &model_store,
+                        &catalog_store,
+                        &agent.session_summary(),
+                    );
                 }
+                AgentCommand::FetchModelChoices {
+                    model,
+                    base_url,
+                    api_key,
+                } => {
+                    let result = async {
+                        let provider = model.parse::<Model>().map_err(anyhow::Error::msg)?;
+                        let client = LlmClient::new(base_url.clone(), api_key.clone(), "");
+                        let model_ids = client.list_models().await?;
+                        catalog_store.save(provider, &base_url, model_ids.clone())?;
+                        Ok::<_, anyhow::Error>((provider, model_ids))
+                    }
+                    .await;
+                    match result {
+                        Ok((provider, model_ids)) => {
+                            let _ = event_tx.send(HostEvent::ModelSetupChoices {
+                                model: provider.id().to_string(),
+                                base_url,
+                                api_key,
+                                model_ids,
+                            });
+                        }
+                        Err(error) => {
+                            let _ = event_tx.send(HostEvent::CommandFailed(format!(
+                                "Failed to discover models: {error}"
+                            )));
+                        }
+                    }
+                }
+                AgentCommand::CatalogDiscovered {
+                    provider,
+                    base_url,
+                    model_ids,
+                } => match apply_catalog_discovery(
+                    &mut agent,
+                    &model_store,
+                    &catalog_store,
+                    provider,
+                    &base_url,
+                    model_ids,
+                ) {
+                    Ok(true) => {
+                        let _ = event_tx.send(session_updated(&agent));
+                    }
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(
+                        ?provider,
+                        ?error,
+                        "failed to apply discovered model catalog"
+                    ),
+                },
                 AgentCommand::SwitchModel(name) => {
                     let requested = match name.parse::<Model>() {
                         Ok(model) => model,
@@ -621,17 +774,34 @@ fn spawn_agent_host(
                         }
                     }
                 }
+                AgentCommand::SwitchModelTo { model, model_id } => {
+                    let result = switch_model_to(&mut agent, &model_store, &model, &model_id);
+                    match result {
+                        Ok(message) => {
+                            let _ = event_tx.send(session_updated(&agent));
+                            let _ = event_tx.send(HostEvent::Notice(message));
+                        }
+                        Err(error) => {
+                            let _ = event_tx.send(HostEvent::CommandFailed(format!(
+                                "Failed to switch model: {error}"
+                            )));
+                        }
+                    }
+                }
                 AgentCommand::ConfigureModel {
                     model,
                     base_url,
                     api_key,
+                    model_id,
                 } => {
                     let result = (|| -> Result<String> {
                         let model = model.parse::<Model>().map_err(anyhow::Error::msg)?;
                         model_store.login(model, &api_key, Some(&base_url))?;
+                        model_store.set_model_id(model, &model_id)?;
                         let config = RuntimeModelConfig::resolve(
                             ModelOverrides {
                                 model: Some(model),
+                                model_id: Some(model_id),
                                 ..ModelOverrides::default()
                             },
                             &model_store,
@@ -753,11 +923,18 @@ fn send_session_list(
 fn send_model_choices(
     sender: &mpsc::UnboundedSender<HostEvent>,
     store: &CredentialStore,
+    catalog_store: &ModelCatalogStore,
     current: &SessionSummary,
 ) {
     match store.model_statuses() {
         Ok(statuses) => {
-            let choices = model_choices(&statuses, &current.model, &current.model_id);
+            let choices = model_choices_with_catalog(
+                &statuses,
+                store,
+                catalog_store,
+                &current.model,
+                &current.model_id,
+            );
             if choices.is_empty() {
                 let _ = sender.send(HostEvent::CommandFailed(
                     "No logged-in models. Run `noya login <model>` first.".to_string(),
@@ -804,6 +981,104 @@ fn switch_model(agent: &mut Agent, store: &CredentialStore, name: &str) -> Resul
     ))
 }
 
+fn switch_model_to(
+    agent: &mut Agent,
+    store: &CredentialStore,
+    name: &str,
+    model_id: &str,
+) -> Result<String> {
+    let requested = name.parse::<Model>().map_err(anyhow::Error::msg)?;
+    let config = RuntimeModelConfig::resolve(
+        ModelOverrides {
+            model: Some(requested),
+            model_id: Some(model_id.to_string()),
+            ..ModelOverrides::default()
+        },
+        store,
+    )?;
+    if config.api_key.is_empty() {
+        bail!("no API credential configured for {}", requested.id());
+    }
+    let llm = LlmClient::new(
+        config.base_url.clone(),
+        config.api_key.clone(),
+        config.model_id.clone(),
+    )
+    .with_custom_temperature(config.model.supports_custom_temperature());
+    store.set_model_id(requested, model_id)?;
+    agent.switch_model(config.model.to_string(), llm)?;
+    Ok(format!(
+        "Switched this session to {} ({}).",
+        config.model, model_id
+    ))
+}
+
+fn apply_catalog_discovery(
+    agent: &mut Agent,
+    credential_store: &CredentialStore,
+    catalog_store: &ModelCatalogStore,
+    provider: Model,
+    base_url: &str,
+    model_ids: Vec<String>,
+) -> Result<bool> {
+    catalog_store.save(provider, base_url, model_ids.clone())?;
+    let current = agent.session_summary();
+    if current.model != provider.id() || model_ids.iter().any(|id| id == &current.model_id) {
+        return Ok(false);
+    }
+    let fallback = model_ids
+        .iter()
+        .find(|id| *id == provider.default_model_id())
+        .cloned()
+        .or_else(|| model_ids.first().cloned())
+        .context("discovered model catalog is empty")?;
+    credential_store.set_model_id(provider, &fallback)?;
+    let config = RuntimeModelConfig::resolve(
+        ModelOverrides {
+            model: Some(provider),
+            model_id: Some(fallback),
+            ..ModelOverrides::default()
+        },
+        credential_store,
+    )?;
+    let llm = LlmClient::new(config.base_url, config.api_key, config.model_id);
+    agent.switch_model(config.model.to_string(), llm)?;
+    Ok(true)
+}
+
+fn model_choices_with_catalog(
+    statuses: &[ModelStatus],
+    store: &CredentialStore,
+    catalog_store: &ModelCatalogStore,
+    current_model: &str,
+    current_model_id: &str,
+) -> Vec<ModelChoice> {
+    let mut choices = Vec::new();
+    for status in statuses {
+        let model_ids = if status.logged_in {
+            store
+                .base_url(status.model)
+                .ok()
+                .flatten()
+                .and_then(|base_url| catalog_store.get(status.model, &base_url).ok().flatten())
+                .map(|catalog| catalog.models)
+                .filter(|models| !models.is_empty())
+                .unwrap_or_else(|| vec![status.model.default_model_id().to_string()])
+        } else {
+            vec![status.model.default_model_id().to_string()]
+        };
+        for model_id in model_ids {
+            choices.push(ModelChoice {
+                model: status.model.id().to_string(),
+                current: current_model == status.model.id() && current_model_id == model_id,
+                model_id,
+            });
+        }
+    }
+    choices
+}
+
+#[cfg(test)]
 fn model_choices(
     statuses: &[ModelStatus],
     current_model: &str,
@@ -811,17 +1086,14 @@ fn model_choices(
 ) -> Vec<ModelChoice> {
     statuses
         .iter()
-        .map(|status| {
-            let current = current_model == status.model.id();
-            ModelChoice {
-                model: status.model.id().to_string(),
-                model_id: if current {
-                    current_model_id.to_string()
-                } else {
-                    status.model.default_model_id().to_string()
-                },
-                current,
-            }
+        .map(|status| ModelChoice {
+            model: status.model.id().to_string(),
+            model_id: if current_model == status.model.id() {
+                current_model_id.to_string()
+            } else {
+                status.model.default_model_id().to_string()
+            },
+            current: current_model == status.model.id(),
         })
         .collect()
 }

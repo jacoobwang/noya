@@ -145,11 +145,28 @@ Claude uses an OpenAI-compatible gateway, not the native Anthropic Messages API.
 }
 ```
 
+Noya also keeps the model IDs discovered from each configured endpoint in `~/.noya/models.json` (or under `NOYA_CONFIG_DIR`). The catalog is keyed by provider and normalized `base_url`; API keys are never written to it. At startup, Noya reads the cached catalog immediately and refreshes configured providers asynchronously through `GET <base_url>/models`. If discovery fails, the previous catalog remains available and the next startup retries automatically.
+
+The catalog uses this shape:
+
+```json
+{
+  "catalogs": {
+    "openai@https://gateway.example/v1": {
+      "provider": "openai",
+      "base_url": "https://gateway.example/v1",
+      "fetched_at": "2026-08-04T08:00:00Z",
+      "models": ["gpt-4o", "gpt-4.1"]
+    }
+  }
+}
+```
+
 Command-line options take precedence over provider settings, which take precedence over built-in defaults. Running `noya login <model>` updates only that provider's API key and preserves its configured endpoint and model ID.
 
 Noya starts in an inline TUI with a welcome header showing the installed version, active model and Model ID, and workspace directory. Type `/` to open the command menu, use ↑/↓ to select a command, Enter to apply it, Tab to complete it without running, and Esc to close the menu. Sent user messages are right-aligned and Agent output is left-aligned. Agent responses are streamed, rendered as Markdown, and written to native terminal scrollback while generation is still in progress. Supported Markdown includes headings, emphasis, inline code, code blocks, lists, blockquotes, and links. `/status` displays the active model and concrete Model ID.
 
-Use `/model` to open an interactive picker containing only models configured through `noya login`. Select with ↑/↓, switch with Enter, or cancel with Esc. `/model <name>` remains available as a direct shortcut and can also use the model's API key environment variable. Switching keeps the existing conversation context and is persisted with the session. `/new` within the same TUI inherits the switched model, but the login default for future Noya launches is unchanged.
+Use `/model` to open an interactive picker containing all supported providers and discovered model IDs. Select with ↑/↓, switch with Enter, or cancel with Esc. Selecting an unconfigured provider starts an in-TUI setup that asks for `base_url`, then a hidden API key, then discovers and displays the endpoint's model IDs. `/model <name>` remains available as a direct shortcut and can also use the model's API key environment variable. If a refreshed catalog no longer contains the current model ID, Noya silently selects the provider default when available, otherwise the first discovered model, and persists that choice.
 
 Each bare `noya` run creates a durable local session. `noya resume` continues the latest session for the current workspace; an ID prefix resumes a specific session:
 

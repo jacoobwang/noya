@@ -10,6 +10,7 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -156,14 +157,123 @@ pub struct CredentialStore {
     path: PathBuf,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelCatalog {
+    pub provider: Model,
+    pub base_url: String,
+    pub fetched_at: String,
+    pub models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ModelCatalogFile {
+    #[serde(default)]
+    catalogs: BTreeMap<String, ModelCatalog>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelCatalogStore {
+    path: PathBuf,
+}
+
+impl ModelCatalogStore {
+    pub fn discover() -> Result<Self> {
+        Ok(Self::at(discover_config_directory()?.join("models.json")))
+    }
+
+    pub fn at(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn get(&self, provider: Model, base_url: &str) -> Result<Option<ModelCatalog>> {
+        let file = self.load()?;
+        Ok(file.catalogs.get(&catalog_key(provider, base_url)).cloned())
+    }
+
+    pub fn save(
+        &self,
+        provider: Model,
+        base_url: &str,
+        models: impl IntoIterator<Item = String>,
+    ) -> Result<ModelCatalog> {
+        let mut file = self.load()?;
+        let mut models = models.into_iter().collect::<Vec<_>>();
+        models.retain(|model| !model.trim().is_empty());
+        models.sort();
+        models.dedup();
+        let catalog = ModelCatalog {
+            provider,
+            base_url: normalize_base_url(base_url),
+            fetched_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
+            models,
+        };
+        file.catalogs
+            .insert(catalog_key(provider, &catalog.base_url), catalog.clone());
+        self.save_file(&file)?;
+        Ok(catalog)
+    }
+
+    fn load(&self) -> Result<ModelCatalogFile> {
+        if !self.path.exists() {
+            return Ok(ModelCatalogFile::default());
+        }
+        let content = fs::read_to_string(&self.path)
+            .with_context(|| format!("read model catalog from {}", self.path.display()))?;
+        serde_json::from_str(&content)
+            .with_context(|| format!("decode model catalog from {}", self.path.display()))
+    }
+
+    fn save_file(&self, file: &ModelCatalogFile) -> Result<()> {
+        let parent = self
+            .path
+            .parent()
+            .context("model catalog path has no parent directory")?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create config directory {}", parent.display()))?;
+        #[cfg(unix)]
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file_handle = options
+            .open(&self.path)
+            .with_context(|| format!("open model catalog file {}", self.path.display()))?;
+        #[cfg(unix)]
+        file_handle.set_permissions(fs::Permissions::from_mode(0o600))?;
+        let encoded = serde_json::to_vec_pretty(file)?;
+        file_handle.write_all(&encoded)?;
+        file_handle.write_all(b"\n")?;
+        file_handle.sync_all()?;
+        Ok(())
+    }
+}
+
+fn discover_config_directory() -> Result<PathBuf> {
+    match std::env::var_os("NOYA_CONFIG_DIR") {
+        Some(path) => Ok(PathBuf::from(path)),
+        None => Ok(dirs::home_dir()
+            .context("cannot determine the user home directory")?
+            .join("noya")),
+    }
+}
+
+fn normalize_base_url(base_url: &str) -> String {
+    base_url.trim().trim_end_matches('/').to_string()
+}
+
+fn catalog_key(provider: Model, base_url: &str) -> String {
+    format!("{}@{}", provider.id(), normalize_base_url(base_url))
+}
+
 impl CredentialStore {
     pub fn discover() -> Result<Self> {
-        let directory = match std::env::var_os("NOYA_CONFIG_DIR") {
-            Some(path) => PathBuf::from(path),
-            None => dirs::home_dir()
-                .context("cannot determine the user home directory")?
-                .join("noya"),
-        };
+        let directory = discover_config_directory()?;
         Ok(Self::at(directory.join("credentials.json")))
     }
 
@@ -238,6 +348,20 @@ impl CredentialStore {
             .models
             .get(model.id())
             .and_then(|credential| credential.model_id.clone()))
+    }
+
+    pub fn set_model_id(&self, model: Model, model_id: &str) -> Result<()> {
+        let model_id = model_id.trim();
+        if model_id.is_empty() {
+            bail!("model ID cannot be empty");
+        }
+        let mut credentials = self.load()?;
+        let credential = credentials
+            .models
+            .get_mut(model.id())
+            .context("cannot set model ID before configuring provider credentials")?;
+        credential.model_id = Some(model_id.to_string());
+        self.save(&credentials)
     }
 
     pub fn model_statuses(&self) -> Result<Vec<ModelStatus>> {
@@ -403,6 +527,39 @@ mod tests {
         assert!(store.logout(Model::DeepSeek).unwrap());
         assert_eq!(store.api_key(Model::DeepSeek).unwrap(), None);
         assert_eq!(store.active_model().unwrap(), None);
+    }
+
+    #[test]
+    fn model_catalogs_are_keyed_by_provider_and_normalized_base_url() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ModelCatalogStore::at(directory.path().join("models.json"));
+
+        let catalog = store
+            .save(
+                Model::Claude,
+                "https://gateway.example/v1///",
+                [
+                    "anthropic/claude-sonnet-4.5".to_string(),
+                    "anthropic/claude-sonnet-4.5".to_string(),
+                    "anthropic/claude-haiku".to_string(),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(catalog.base_url, "https://gateway.example/v1");
+        assert_eq!(
+            catalog.models,
+            vec![
+                "anthropic/claude-haiku".to_string(),
+                "anthropic/claude-sonnet-4.5".to_string()
+            ]
+        );
+        assert_eq!(
+            store
+                .get(Model::Claude, "https://gateway.example/v1/")
+                .unwrap(),
+            Some(catalog)
+        );
     }
 
     #[test]

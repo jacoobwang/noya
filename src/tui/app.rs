@@ -74,6 +74,7 @@ pub enum AppMode {
 struct ModelSetup {
     model: String,
     base_url: String,
+    api_key: Option<String>,
     step: ModelSetupStep,
 }
 
@@ -81,6 +82,7 @@ struct ModelSetup {
 enum ModelSetupStep {
     BaseUrl,
     ApiKey,
+    SelectingModel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,10 +101,20 @@ pub enum TuiAction {
     NewSession,
     ListModels,
     SwitchModel(String),
+    SwitchModelTo {
+        model: String,
+        model_id: String,
+    },
+    FetchModelChoices {
+        model: String,
+        base_url: String,
+        api_key: String,
+    },
     ConfigureModel {
         model: String,
         base_url: String,
         api_key: String,
+        model_id: String,
     },
     ListSessions,
     ResumeSession(String),
@@ -438,9 +450,28 @@ impl App {
             return TuiAction::None;
         };
         let model = choice.model.clone();
+        let model_id = choice.model_id.clone();
+        if let Some(setup) = self.model_setup.take() {
+            self.close_model_menu();
+            self.agent_state = AgentState::Thinking;
+            return TuiAction::ConfigureModel {
+                model: setup.model,
+                base_url: setup.base_url,
+                api_key: setup.api_key.unwrap_or_default(),
+                model_id,
+            };
+        }
         self.close_model_menu();
         self.agent_state = AgentState::Thinking;
-        TuiAction::SwitchModel(model)
+        let is_default = model
+            .parse::<crate::model::Model>()
+            .ok()
+            .is_some_and(|value| model_id == value.default_model_id());
+        if is_default {
+            TuiAction::SwitchModel(model)
+        } else {
+            TuiAction::SwitchModelTo { model, model_id }
+        }
     }
 
     pub fn close_model_menu(&mut self) {
@@ -454,6 +485,7 @@ impl App {
         self.model_setup = Some(ModelSetup {
             model,
             base_url,
+            api_key: None,
             step: ModelSetupStep::BaseUrl,
         });
         self.input.clear();
@@ -467,6 +499,7 @@ impl App {
         match self.model_setup.as_ref()?.step {
             ModelSetupStep::BaseUrl => Some("Base URL (Enter to accept):"),
             ModelSetupStep::ApiKey => Some("API key (hidden):"),
+            ModelSetupStep::SelectingModel => Some("Select model:"),
         }
     }
 
@@ -486,6 +519,7 @@ impl App {
             self.status_message = Some(match setup.step {
                 ModelSetupStep::BaseUrl => "Base URL cannot be empty.".to_string(),
                 ModelSetupStep::ApiKey => "API key cannot be empty.".to_string(),
+                ModelSetupStep::SelectingModel => "Select a model first.".to_string(),
             });
             return TuiAction::None;
         }
@@ -499,19 +533,45 @@ impl App {
                 TuiAction::None
             }
             ModelSetupStep::ApiKey => {
-                let result = TuiAction::ConfigureModel {
+                setup.api_key = Some(value.clone());
+                setup.step = ModelSetupStep::SelectingModel;
+                self.input.clear();
+                self.cursor_position = 0;
+                self.status_message = Some("Loading available models...".to_string());
+                TuiAction::FetchModelChoices {
                     model: setup.model.clone(),
                     base_url: setup.base_url.clone(),
                     api_key: value,
-                };
-                self.model_setup = None;
-                self.mode = AppMode::Normal;
-                self.input.clear();
-                self.cursor_position = 0;
-                self.agent_state = AgentState::Thinking;
-                result
+                }
             }
+            ModelSetupStep::SelectingModel => TuiAction::None,
         }
+    }
+
+    pub fn begin_model_selection(
+        &mut self,
+        model: String,
+        base_url: String,
+        api_key: String,
+        model_ids: Vec<String>,
+    ) {
+        self.model_choices = model_ids
+            .into_iter()
+            .map(|model_id| ModelChoice {
+                model: model.clone(),
+                model_id,
+                current: false,
+            })
+            .collect();
+        self.model_selection = 0;
+        if let Some(setup) = self.model_setup.as_mut() {
+            setup.base_url = base_url;
+            setup.api_key = Some(api_key);
+            setup.step = ModelSetupStep::SelectingModel;
+        }
+        self.mode = AppMode::SelectingModel;
+        self.agent_state = AgentState::Idle;
+        self.status_message = None;
     }
 
     pub fn cancel_model_setup(&mut self) {
@@ -888,13 +948,13 @@ mod tests {
 
         assert_eq!(
             app.submit_model_setup_input(),
-            TuiAction::ConfigureModel {
+            TuiAction::FetchModelChoices {
                 model: "openai".to_string(),
                 base_url: "https://gateway.example/v1".to_string(),
                 api_key: "sk-test".to_string(),
             }
         );
-        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.mode, AppMode::ConfiguringModel);
     }
 
     #[test]
