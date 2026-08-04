@@ -23,3 +23,21 @@ _Avoid_: Model configuration, credential refresh
 **Model Selection Fallback**:
 The deterministic automatic choice used when a configured Model ID is no longer present in the latest Model Catalog: prefer the Provider default, then the first catalog entry.
 _Avoid_: Silent model migration, random model selection
+
+## Code Navigation
+
+**Language Server**:
+A workspace-aware service that understands a programming language and answers semantic code queries such as definitions, references, and symbols.
+_Avoid_: Compiler, text search engine
+
+**Code Navigation**:
+A semantic query over workspace code that returns definitions, references, or workspace symbols with source locations.
+_Avoid_: Text search, file search
+
+**Semantic Result**:
+A code-navigation result identified by a Language Server as a definition, reference, or symbol, including its source location and code context.
+_Avoid_: Text match, grep result
+
+**Text Search Fallback**:
+A plain-text search result used when workspace-symbol navigation has no available Language Server; it is not treated as a semantic definition or reference.
+_Avoid_: Semantic fallback, inferred definition

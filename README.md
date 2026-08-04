@@ -13,7 +13,7 @@ CLI / future HTTP host
       /  |  \
 Session Prompt ToolRegistry
    |      |       |
- JSONL workspace  read/list/search/patch/write/git/run
+ JSONL workspace  read/list/search/navigation/patch/write/git/run
           |
        LlmClient (OpenAI-compatible)
 ```
@@ -223,18 +223,21 @@ TUI commands:
 /quit       Exit
 ```
 
-`Ctrl+C` cancels an active turn and exits when idle. `Ctrl+D` always exits. All eight built-in tools execute without confirmation:
+`Ctrl+C` cancels an active turn and exits when idle. `Ctrl+D` always exits. All nine built-in tools execute without confirmation:
 
 ```text
 read_file    Read a whole UTF-8 file or an offset/limit line range
 list_dir     List a workspace directory
 search_text  Search recursively with ripgrep
+code_navigation  Find definitions, references, or workspace symbols through a local LSP
 apply_patch  Apply a validated batch of exact, unambiguous text replacements
 write_file   Create or replace a UTF-8 file
 git_status   Show concise branch and working-tree status
 git_diff     Show staged or unstaged changes, optionally for one path
 run_command  Run a non-interactive shell command in the workspace
 ```
+
+`code_navigation` uses a locally installed language server when available. Noya currently recognizes Rust, C/C++, Go, Python, TypeScript/JavaScript, Lua, and Bash. Servers are started lazily per workspace and language; the current `--workspace` is always used as the LSP root. Set a user-level override such as `NOYA_LSP_RUST=/custom/bin/rust-analyzer` when a server is not on `PATH`. `workspace_symbols` falls back to plain-text search when its language server is unavailable; definitions and references return an explicit LSP error instead of pretending text matches are semantic results.
 
 ## Current Scope
 

@@ -3,6 +3,7 @@
 mod command;
 mod filesystem;
 mod git;
+mod lsp;
 mod patch;
 
 use anyhow::Result;
@@ -10,6 +11,7 @@ use async_trait::async_trait;
 use command::RunCommand;
 use filesystem::{ListDir, ReadFile, SearchText, WriteFile};
 use git::{GitDiff, GitStatus};
+use lsp::CodeNavigation;
 use patch::ApplyPatch;
 use serde_json::Value;
 use std::{path::PathBuf, sync::Arc};
@@ -46,6 +48,7 @@ impl ToolRegistry {
                 Arc::new(SearchText {
                     workspace: workspace.clone(),
                 }),
+                Arc::new(CodeNavigation::new(workspace.clone())),
                 Arc::new(ApplyPatch {
                     workspace: workspace.clone(),
                 }),
@@ -97,6 +100,7 @@ mod tests {
         assert_eq!(registry.requires_approval("read_file"), Some(false));
         assert_eq!(registry.requires_approval("list_dir"), Some(false));
         assert_eq!(registry.requires_approval("search_text"), Some(false));
+        assert_eq!(registry.requires_approval("code_navigation"), Some(false));
         assert_eq!(registry.requires_approval("apply_patch"), Some(false));
         assert_eq!(registry.requires_approval("git_status"), Some(false));
         assert_eq!(registry.requires_approval("git_diff"), Some(false));
@@ -119,6 +123,7 @@ mod tests {
                 "read_file",
                 "list_dir",
                 "search_text",
+                "code_navigation",
                 "apply_patch",
                 "write_file",
                 "git_status",
