@@ -108,7 +108,7 @@ openai    gpt-4o              not logged in
 deepseek  deepseek-v4-flash   not logged in
 qwen      qwen3-coder-plus    active
 kimi      kimi-k3             not logged in
-claude    claude-sonnet-4     not logged in
+claude    anthropic/claude-sonnet-4.5  not logged in
 ```
 
 各 model 的默认配置：
@@ -118,7 +118,7 @@ claude    claude-sonnet-4     not logged in
 | `openai` | `https://api.openai.com/v1` | `gpt-4o` | `OPENAI_API_KEY` |
 | `deepseek` | `https://api.deepseek.com` | `deepseek-v4-flash` | `DEEPSEEK_API_KEY` |
 | `qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3-coder-plus` | `DASHSCOPE_API_KEY` |
-| `claude` | `https://openrouter.ai/api/v1` | `claude-sonnet-4` | `CLAUDE_API_KEY` |
+| `claude` | `https://openrouter.ai/api/v1` | `anthropic/claude-sonnet-4.5` | `OPENROUTER_API_KEY` |
 | `kimi` | `https://api.moonshot.cn/v1` | `kimi-k3` | `MOONSHOT_API_KEY` |
 
 凭证保存在当前用户 home 目录下的 `~/.noya/credentials.json` 中。设置 `NOYA_CONFIG_DIR` 可以使用其他凭证目录。实际路径会在登录成功后输出；Unix 下目录权限为 `0700`，文件权限为 `0600`。也可以用上表中的环境变量临时提供凭证。

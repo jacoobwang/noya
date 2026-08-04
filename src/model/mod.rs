@@ -51,7 +51,7 @@ impl Model {
             Self::DeepSeek => "deepseek-v4-flash",
             Self::Qwen => "qwen3-coder-plus",
             Self::Kimi => "kimi-k3",
-            Self::Claude => "claude-sonnet-4",
+            Self::Claude => "anthropic/claude-sonnet-4.5",
         }
     }
 
@@ -71,7 +71,7 @@ impl Model {
             Self::DeepSeek => "DEEPSEEK_API_KEY",
             Self::Qwen => "DASHSCOPE_API_KEY",
             Self::Kimi => "MOONSHOT_API_KEY",
-            Self::Claude => "CLAUDE_API_KEY",
+            Self::Claude => "OPENROUTER_API_KEY",
         }
     }
 
@@ -364,6 +364,11 @@ mod tests {
         assert_eq!(kimi.api_key_env(), "MOONSHOT_API_KEY");
         assert!(!kimi.supports_custom_temperature());
         assert!(qwen.supports_custom_temperature());
+
+        let claude: Model = "claude".parse().unwrap();
+        assert_eq!(claude.base_url(), "https://openrouter.ai/api/v1");
+        assert_eq!(claude.default_model_id(), "anthropic/claude-sonnet-4.5");
+        assert_eq!(claude.api_key_env(), "OPENROUTER_API_KEY");
 
         assert_eq!(
             Model::supported(),
