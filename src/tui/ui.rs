@@ -633,9 +633,9 @@ fn message_style(kind: MessageKind) -> (&'static str, Style, Style) {
         MessageKind::Tool => (
             "Tool",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::LightMagenta)
                 .add_modifier(Modifier::BOLD),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(Color::Gray),
         ),
         MessageKind::System => (
             "System",
@@ -724,6 +724,16 @@ mod tests {
         assert!(lines.iter().flat_map(|line| &line.spans).any(|span| {
             span.content == "cargo test" && span.style.add_modifier.contains(Modifier::BOLD)
         }));
+    }
+
+    #[test]
+    fn tool_messages_use_an_accented_label_and_muted_content() {
+        let (label, label_style, content_style) = message_style(MessageKind::Tool);
+
+        assert_eq!(label, "Tool");
+        assert_eq!(label_style.fg, Some(Color::LightMagenta));
+        assert!(label_style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(content_style.fg, Some(Color::Gray));
     }
 
     #[test]
