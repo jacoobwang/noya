@@ -13,7 +13,10 @@ use ratatui::{
 use textwrap::Options as WrapOptions;
 use unicode_width::UnicodeWidthStr;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 
 pub const VIEWPORT_HEIGHT: u16 = 9;
 const INPUT_PROMPT: &str = "> ";
@@ -459,6 +462,13 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     if !matches!(app.agent_state, AgentState::Idle | AgentState::Error) {
         label = format!("{} {label}", spinner());
     }
+    if let Some(elapsed) = app.active_turn_elapsed() {
+        label.push_str(&format!(
+            " ({} · ↓ {} tokens)",
+            format_elapsed(elapsed),
+            app.active_turn_output_tokens()
+        ));
+    }
     let mut spans = vec![Span::styled(
         label,
         Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -476,6 +486,15 @@ fn spinner() -> &'static str {
     const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     static FRAME: AtomicUsize = AtomicUsize::new(0);
     FRAMES[FRAME.fetch_add(1, Ordering::Relaxed) % FRAMES.len()]
+}
+
+fn format_elapsed(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
+    }
 }
 
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {
@@ -780,6 +799,12 @@ mod tests {
         assert_eq!(input.height, 2);
         assert_eq!(menu.y, input.bottom());
         assert_eq!(menu.height, COMMAND_MENU_HEIGHT);
+    }
+
+    #[test]
+    fn formats_elapsed_status_for_seconds_and_minutes() {
+        assert_eq!(format_elapsed(Duration::from_secs(9)), "9s");
+        assert_eq!(format_elapsed(Duration::from_secs(125)), "2m 05s");
     }
 
     #[test]

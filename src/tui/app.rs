@@ -5,7 +5,11 @@ use crate::{
     session::{SessionSummary, Transcript, TranscriptKind},
 };
 use serde_json::Value;
-use std::{collections::VecDeque, path::PathBuf};
+use std::{
+    collections::VecDeque,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 use uuid::Uuid;
 
 const MAX_MESSAGE_HISTORY: usize = 1000;
@@ -152,6 +156,8 @@ pub struct App {
     pub session: Option<SessionSummary>,
     pub session_log_path: Option<PathBuf>,
     pub context_tokens: usize,
+    turn_started_at: Option<Instant>,
+    turn_output_chars: usize,
     command_menu_dismissed: bool,
     model_setup: Option<ModelSetup>,
 }
@@ -175,6 +181,8 @@ impl App {
             session: None,
             session_log_path: None,
             context_tokens: 0,
+            turn_started_at: None,
+            turn_output_chars: 0,
             command_menu_dismissed: false,
             model_setup: None,
         }
@@ -194,6 +202,7 @@ impl App {
         self.session = Some(summary);
         self.session_log_path = log_path;
         self.context_tokens = context_tokens;
+        self.clear_turn_metrics();
         self.agent_state = AgentState::Idle;
         self.mode = AppMode::Normal;
         self.model_choices.clear();
@@ -236,6 +245,8 @@ impl App {
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::TurnStarted { .. } => {
+                self.turn_started_at = Some(Instant::now());
+                self.turn_output_chars = 0;
                 self.agent_state = AgentState::Thinking;
                 self.status_message = None;
             }
@@ -245,6 +256,7 @@ impl App {
                 is_final,
                 ..
             } => {
+                self.turn_output_chars += chunk.chars().count();
                 if self.streaming_message_id != Some(message_id) && !chunk.is_empty() {
                     self.finish_streaming_message();
                     let mut message = Message::streaming(MessageKind::Agent);
@@ -325,6 +337,7 @@ impl App {
             }
             AgentEvent::TurnCompleted { .. } => {
                 self.finish_streaming_message();
+                self.clear_turn_metrics();
                 self.agent_state = AgentState::Idle;
                 self.mode = AppMode::Normal;
                 self.pending_approval = None;
@@ -347,6 +360,7 @@ impl App {
                 ));
                 if turn_id.is_none() {
                     self.finish_streaming_message();
+                    self.clear_turn_metrics();
                     self.agent_state = if recoverable {
                         AgentState::Idle
                     } else {
@@ -839,6 +853,19 @@ impl App {
         }
     }
 
+    pub fn active_turn_elapsed(&self) -> Option<Duration> {
+        self.turn_started_at.map(|started| started.elapsed())
+    }
+
+    pub fn active_turn_output_tokens(&self) -> usize {
+        self.turn_output_chars.div_ceil(4)
+    }
+
+    fn clear_turn_metrics(&mut self) {
+        self.turn_started_at = None;
+        self.turn_output_chars = 0;
+    }
+
     fn finish_streaming_message(&mut self) {
         if let Some(id) = self.streaming_message_id.take()
             && let Some(message) = self.messages.iter_mut().find(|message| message.id == id)
@@ -904,6 +931,24 @@ mod tests {
 
         assert!(!app.messages[0].is_streaming);
         assert_eq!(app.streaming_message_id, None);
+    }
+
+    #[test]
+    fn active_turn_tracks_elapsed_and_output_tokens() {
+        let mut app = app();
+        let turn_id = TurnId::new();
+        let message_id = Uuid::new_v4();
+
+        app.handle_agent_event(AgentEvent::TurnStarted { turn_id });
+        app.handle_agent_event(text_delta(turn_id, message_id, "Hello", false));
+
+        assert!(app.active_turn_elapsed().is_some());
+        assert_eq!(app.active_turn_output_tokens(), 2);
+
+        app.handle_agent_event(AgentEvent::TurnCompleted { turn_id });
+
+        assert!(app.active_turn_elapsed().is_none());
+        assert_eq!(app.active_turn_output_tokens(), 0);
     }
 
     fn app() -> App {

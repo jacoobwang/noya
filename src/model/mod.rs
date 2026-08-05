@@ -766,6 +766,7 @@ mod tests {
                 api_key: Some("override-key".to_string()),
                 base_url: Some("https://gateway.example/v1".to_string()),
                 model_id: Some("custom-model".to_string()),
+                ..ModelOverrides::default()
             },
             &store,
         )
