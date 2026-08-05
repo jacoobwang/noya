@@ -1,6 +1,7 @@
 use crate::tui::command::{self, SlashCommand};
 use crate::{
     AgentEvent, ApprovalDecision, ApprovalRequest,
+    model::{AuthenticationMode, Model, ProviderProtocol},
     session::{SessionSummary, Transcript, TranscriptKind},
 };
 use serde_json::Value;
@@ -75,12 +76,16 @@ struct ModelSetup {
     model: String,
     base_url: String,
     api_key: Option<String>,
+    protocol: ProviderProtocol,
+    authentication: AuthenticationMode,
     step: ModelSetupStep,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelSetupStep {
+    Protocol,
     BaseUrl,
+    Authentication,
     ApiKey,
     SelectingModel,
 }
@@ -109,12 +114,16 @@ pub enum TuiAction {
         model: String,
         base_url: String,
         api_key: String,
+        protocol: ProviderProtocol,
+        authentication: AuthenticationMode,
     },
     ConfigureModel {
         model: String,
         base_url: String,
         api_key: String,
         model_id: String,
+        protocol: ProviderProtocol,
+        authentication: AuthenticationMode,
     },
     ListSessions,
     ResumeSession(String),
@@ -459,6 +468,8 @@ impl App {
                 base_url: setup.base_url,
                 api_key: setup.api_key.unwrap_or_default(),
                 model_id,
+                protocol: setup.protocol,
+                authentication: setup.authentication,
             };
         }
         self.close_model_menu();
@@ -481,12 +492,19 @@ impl App {
     }
 
     pub fn begin_model_setup(&mut self, model: String, base_url: String) {
+        let parsed_model = model.parse::<Model>().ok();
         self.mode = AppMode::ConfiguringModel;
         self.model_setup = Some(ModelSetup {
             model,
             base_url,
             api_key: None,
-            step: ModelSetupStep::BaseUrl,
+            protocol: parsed_model
+                .map(|model| model.default_protocol())
+                .unwrap_or(ProviderProtocol::OpenaiCompatible),
+            authentication: parsed_model
+                .map(|model| model.default_authentication())
+                .unwrap_or(AuthenticationMode::Bearer),
+            step: ModelSetupStep::Protocol,
         });
         self.input.clear();
         self.cursor_position = 0;
@@ -497,7 +515,9 @@ impl App {
 
     pub fn model_setup_prompt(&self) -> Option<&'static str> {
         match self.model_setup.as_ref()?.step {
+            ModelSetupStep::Protocol => Some("Protocol (Enter for default):"),
             ModelSetupStep::BaseUrl => Some("Base URL (Enter to accept):"),
+            ModelSetupStep::Authentication => Some("Authentication (Enter for default):"),
             ModelSetupStep::ApiKey => Some("API key (hidden):"),
             ModelSetupStep::SelectingModel => Some("Select model:"),
         }
@@ -511,21 +531,62 @@ impl App {
     }
 
     pub fn submit_model_setup_input(&mut self) -> TuiAction {
-        let Some(setup) = self.model_setup.as_mut() else {
+        let Some(step) = self.model_setup.as_ref().map(|setup| setup.step) else {
             return TuiAction::None;
         };
         let value = self.input.trim().to_string();
-        if value.is_empty() {
-            self.status_message = Some(match setup.step {
-                ModelSetupStep::BaseUrl => "Base URL cannot be empty.".to_string(),
-                ModelSetupStep::ApiKey => "API key cannot be empty.".to_string(),
-                ModelSetupStep::SelectingModel => "Select a model first.".to_string(),
-            });
-            return TuiAction::None;
-        }
-        match setup.step {
+        match step {
+            ModelSetupStep::Protocol => {
+                let protocol = if value.is_empty() {
+                    self.model_setup.as_ref().unwrap().protocol
+                } else {
+                    match value.parse::<ProviderProtocol>() {
+                        Ok(protocol) => protocol,
+                        Err(error) => {
+                            self.status_message = Some(error);
+                            return TuiAction::None;
+                        }
+                    }
+                };
+                let setup = self.model_setup.as_mut().unwrap();
+                setup.protocol = protocol;
+                setup.authentication = match protocol {
+                    ProviderProtocol::AnthropicMessages => AuthenticationMode::XApiKey,
+                    ProviderProtocol::OpenaiCompatible => AuthenticationMode::Bearer,
+                };
+                setup.step = ModelSetupStep::BaseUrl;
+                self.input.clear();
+                self.cursor_position = 0;
+                self.status_message = None;
+                TuiAction::None
+            }
             ModelSetupStep::BaseUrl => {
+                if value.is_empty() {
+                    self.status_message = Some("Base URL cannot be empty.".to_string());
+                    return TuiAction::None;
+                }
+                let setup = self.model_setup.as_mut().unwrap();
                 setup.base_url = value;
+                setup.step = ModelSetupStep::Authentication;
+                self.input.clear();
+                self.cursor_position = 0;
+                self.status_message = None;
+                TuiAction::None
+            }
+            ModelSetupStep::Authentication => {
+                let authentication = if value.is_empty() {
+                    self.model_setup.as_ref().unwrap().authentication
+                } else {
+                    match value.parse::<AuthenticationMode>() {
+                        Ok(authentication) => authentication,
+                        Err(error) => {
+                            self.status_message = Some(error);
+                            return TuiAction::None;
+                        }
+                    }
+                };
+                let setup = self.model_setup.as_mut().unwrap();
+                setup.authentication = authentication;
                 setup.step = ModelSetupStep::ApiKey;
                 self.input.clear();
                 self.cursor_position = 0;
@@ -533,6 +594,11 @@ impl App {
                 TuiAction::None
             }
             ModelSetupStep::ApiKey => {
+                if value.is_empty() {
+                    self.status_message = Some("API key cannot be empty.".to_string());
+                    return TuiAction::None;
+                }
+                let setup = self.model_setup.as_mut().unwrap();
                 setup.api_key = Some(value.clone());
                 setup.step = ModelSetupStep::SelectingModel;
                 self.input.clear();
@@ -542,9 +608,14 @@ impl App {
                     model: setup.model.clone(),
                     base_url: setup.base_url.clone(),
                     api_key: value,
+                    protocol: setup.protocol,
+                    authentication: setup.authentication,
                 }
             }
-            ModelSetupStep::SelectingModel => TuiAction::None,
+            ModelSetupStep::SelectingModel => {
+                self.status_message = Some("Select a model first.".to_string());
+                TuiAction::None
+            }
         }
     }
 
@@ -554,6 +625,8 @@ impl App {
         base_url: String,
         api_key: String,
         model_ids: Vec<String>,
+        protocol: ProviderProtocol,
+        authentication: AuthenticationMode,
     ) {
         self.model_choices = model_ids
             .into_iter()
@@ -567,6 +640,8 @@ impl App {
         if let Some(setup) = self.model_setup.as_mut() {
             setup.base_url = base_url;
             setup.api_key = Some(api_key);
+            setup.protocol = protocol;
+            setup.authentication = authentication;
             setup.step = ModelSetupStep::SelectingModel;
         }
         self.mode = AppMode::SelectingModel;
@@ -935,12 +1010,22 @@ mod tests {
         assert_eq!(app.mode, AppMode::ConfiguringModel);
         assert_eq!(
             app.model_setup_prompt(),
-            Some("Base URL (Enter to accept):")
+            Some("Protocol (Enter for default):")
         );
         assert!(app.input.is_empty());
 
+        assert_eq!(app.submit_model_setup_input(), TuiAction::None);
+        assert_eq!(
+            app.model_setup_prompt(),
+            Some("Base URL (Enter to accept):")
+        );
         app.input = "https://gateway.example/v1".to_string();
         app.cursor_position = app.input.len();
+        assert_eq!(app.submit_model_setup_input(), TuiAction::None);
+        assert_eq!(
+            app.model_setup_prompt(),
+            Some("Authentication (Enter for default):")
+        );
         assert_eq!(app.submit_model_setup_input(), TuiAction::None);
         assert_eq!(app.model_setup_prompt(), Some("API key (hidden):"));
         app.input = "sk-test".to_string();
@@ -952,6 +1037,8 @@ mod tests {
                 model: "openai".to_string(),
                 base_url: "https://gateway.example/v1".to_string(),
                 api_key: "sk-test".to_string(),
+                protocol: ProviderProtocol::OpenaiCompatible,
+                authentication: AuthenticationMode::Bearer,
             }
         );
         assert_eq!(app.mode, AppMode::ConfiguringModel);

@@ -12,7 +12,8 @@ use app::{App, ModelChoice, TuiAction};
 use crate::{
     Agent, AgentEvent, ApprovalPrompt, LlmClient, TurnControl,
     model::{
-        CredentialStore, Model, ModelCatalogStore, ModelOverrides, ModelStatus, RuntimeModelConfig,
+        AuthenticationMode, CredentialStore, Model, ModelCatalogStore, ModelOverrides, ModelStatus,
+        ProviderProtocol, RuntimeModelConfig,
     },
     session::{CreateSession, SessionFilter, SessionManager, SessionSummary, Transcript},
 };
@@ -72,6 +73,8 @@ enum AgentCommand {
         model: String,
         base_url: String,
         api_key: String,
+        protocol: ProviderProtocol,
+        authentication: AuthenticationMode,
     },
     CatalogDiscovered {
         provider: Model,
@@ -83,6 +86,8 @@ enum AgentCommand {
         base_url: String,
         api_key: String,
         model_id: String,
+        protocol: ProviderProtocol,
+        authentication: AuthenticationMode,
     },
     ListSessions,
     ResumeSession(String),
@@ -117,6 +122,8 @@ enum HostEvent {
         base_url: String,
         api_key: String,
         model_ids: Vec<String>,
+        protocol: ProviderProtocol,
+        authentication: AuthenticationMode,
     },
     RetrySubmitted(String),
     Notice(String),
@@ -241,8 +248,22 @@ async fn run_loop(terminal: &mut NoyaTerminal, agent: Agent, info: AppInfo) -> R
                     HostEvent::ModelSetupRequired { model, base_url } => {
                         app.begin_model_setup(model.id().to_string(), base_url);
                     }
-                    HostEvent::ModelSetupChoices { model, base_url, api_key, model_ids } => {
-                        app.begin_model_selection(model, base_url, api_key, model_ids);
+                    HostEvent::ModelSetupChoices {
+                        model,
+                        base_url,
+                        api_key,
+                        model_ids,
+                        protocol,
+                        authentication,
+                    } => {
+                        app.begin_model_selection(
+                            model,
+                            base_url,
+                            api_key,
+                            model_ids,
+                            protocol,
+                            authentication,
+                        );
                     }
                     HostEvent::RetrySubmitted(input) => {
                         app.add_message(app::Message::new(app::MessageKind::User, input));
@@ -313,11 +334,15 @@ fn apply_action(
             model,
             base_url,
             api_key,
+            protocol,
+            authentication,
         } => {
             let _ = command_tx.send(AgentCommand::FetchModelChoices {
                 model,
                 base_url,
                 api_key,
+                protocol,
+                authentication,
             });
         }
         TuiAction::ConfigureModel {
@@ -325,12 +350,16 @@ fn apply_action(
             base_url,
             api_key,
             model_id,
+            protocol,
+            authentication,
         } => {
             let _ = command_tx.send(AgentCommand::ConfigureModel {
                 model,
                 base_url,
                 api_key,
                 model_id,
+                protocol,
+                authentication,
             });
         }
         TuiAction::ListSessions => {
@@ -491,7 +520,14 @@ fn spawn_agent_host(
             if config.api_key.trim().is_empty() || config.base_url.trim().is_empty() {
                 continue;
             }
-            let client = LlmClient::new(config.base_url.clone(), config.api_key, config.model_id);
+            let client = LlmClient::with_settings(
+                reqwest::Client::new(),
+                config.base_url.clone(),
+                config.api_key,
+                config.model_id,
+                config.protocol,
+                config.authentication,
+            );
             match client.list_models().await {
                 Ok(model_ids) => {
                     let _ = discovery_tx.send(AgentCommand::CatalogDiscovered {
@@ -683,10 +719,19 @@ fn spawn_agent_host(
                     model,
                     base_url,
                     api_key,
+                    protocol,
+                    authentication,
                 } => {
                     let result = async {
                         let provider = model.parse::<Model>().map_err(anyhow::Error::msg)?;
-                        let client = LlmClient::new(base_url.clone(), api_key.clone(), "");
+                        let client = LlmClient::with_settings(
+                            reqwest::Client::new(),
+                            base_url.clone(),
+                            api_key.clone(),
+                            "",
+                            protocol,
+                            authentication,
+                        );
                         let model_ids = client.list_models().await?;
                         catalog_store.save(provider, &base_url, model_ids.clone())?;
                         Ok::<_, anyhow::Error>((provider, model_ids))
@@ -699,6 +744,8 @@ fn spawn_agent_host(
                                 base_url,
                                 api_key,
                                 model_ids,
+                                protocol,
+                                authentication,
                             });
                         }
                         Err(error) => {
@@ -793,10 +840,18 @@ fn spawn_agent_host(
                     base_url,
                     api_key,
                     model_id,
+                    protocol,
+                    authentication,
                 } => {
                     let result = (|| -> Result<String> {
                         let model = model.parse::<Model>().map_err(anyhow::Error::msg)?;
-                        model_store.login(model, &api_key, Some(&base_url))?;
+                        model_store.login_with_config(
+                            model,
+                            &api_key,
+                            Some(&base_url),
+                            protocol,
+                            authentication,
+                        )?;
                         model_store.set_model_id(model, &model_id)?;
                         let config = RuntimeModelConfig::resolve(
                             ModelOverrides {
@@ -806,10 +861,13 @@ fn spawn_agent_host(
                             },
                             &model_store,
                         )?;
-                        let llm = LlmClient::new(
+                        let llm = LlmClient::with_settings(
+                            reqwest::Client::new(),
                             config.base_url.clone(),
                             config.api_key.clone(),
                             config.model_id.clone(),
+                            config.protocol,
+                            config.authentication,
                         )
                         .with_custom_temperature(config.model.supports_custom_temperature());
                         agent.switch_model(config.model.to_string(), llm)?;
@@ -968,10 +1026,13 @@ fn switch_model(agent: &mut Agent, store: &CredentialStore, name: &str) -> Resul
         },
         store,
     )?;
-    let llm = LlmClient::new(
+    let llm = LlmClient::with_settings(
+        reqwest::Client::new(),
         model.base_url.clone(),
         model.api_key.clone(),
         model.model_id.clone(),
+        model.protocol,
+        model.authentication,
     )
     .with_custom_temperature(model.model.supports_custom_temperature());
     agent.switch_model(model.model.to_string(), llm)?;
@@ -999,10 +1060,13 @@ fn switch_model_to(
     if config.api_key.is_empty() {
         bail!("no API credential configured for {}", requested.id());
     }
-    let llm = LlmClient::new(
+    let llm = LlmClient::with_settings(
+        reqwest::Client::new(),
         config.base_url.clone(),
         config.api_key.clone(),
         config.model_id.clone(),
+        config.protocol,
+        config.authentication,
     )
     .with_custom_temperature(config.model.supports_custom_temperature());
     store.set_model_id(requested, model_id)?;
@@ -1041,7 +1105,14 @@ fn apply_catalog_discovery(
         },
         credential_store,
     )?;
-    let llm = LlmClient::new(config.base_url, config.api_key, config.model_id);
+    let llm = LlmClient::with_settings(
+        reqwest::Client::new(),
+        config.base_url,
+        config.api_key,
+        config.model_id,
+        config.protocol,
+        config.authentication,
+    );
     agent.switch_model(config.model.to_string(), llm)?;
     Ok(true)
 }

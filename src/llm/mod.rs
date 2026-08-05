@@ -1,5 +1,7 @@
-//! OpenAI-compatible LLM adapter. Protocol DTOs and SSE assembly stay internal.
+//! Provider LLM adapters. The public seam exposes one internal conversation model while
+//! protocol-specific request and stream handling stays behind `LlmClient`.
 
+mod anthropic;
 mod protocol;
 mod stream;
 
@@ -9,8 +11,9 @@ pub use protocol::{
 };
 
 use anyhow::{Context, Result, bail};
+use crate::model::{AuthenticationMode, ProviderProtocol};
 use futures_util::StreamExt;
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder};
 use serde::Deserialize;
 use stream::{StreamAccumulator, decode_sse_data, find_event_boundary};
 
@@ -21,6 +24,8 @@ pub struct LlmClient {
     api_key: String,
     model: String,
     send_temperature: bool,
+    protocol: ProviderProtocol,
+    authentication: AuthenticationMode,
 }
 
 impl LlmClient {
@@ -38,12 +43,32 @@ impl LlmClient {
         api_key: impl Into<String>,
         model: impl Into<String>,
     ) -> Self {
+        Self::with_settings(
+            http,
+            base_url,
+            api_key,
+            model,
+            ProviderProtocol::OpenaiCompatible,
+            AuthenticationMode::Bearer,
+        )
+    }
+
+    pub fn with_settings(
+        http: Client,
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+        protocol: ProviderProtocol,
+        authentication: AuthenticationMode,
+    ) -> Self {
         Self {
             http,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
             model: model.into(),
             send_temperature: true,
+            protocol,
+            authentication,
         }
     }
 
@@ -58,10 +83,16 @@ impl LlmClient {
 
     pub async fn list_models(&self) -> Result<Vec<String>> {
         self.ensure_api_key()?;
-        let response = self
+        let request = self
             .http
-            .get(format!("{}/models", self.base_url))
-            .bearer_auth(&self.api_key)
+            .get(format!("{}/models", self.base_url));
+        let request = if self.protocol == ProviderProtocol::AnthropicMessages {
+            request.header("anthropic-version", "2023-06-01")
+        } else {
+            request
+        };
+        let response = self
+            .authenticated(request)
             .send()
             .await
             .context("send model discovery request")?;
@@ -95,18 +126,22 @@ impl LlmClient {
         tools: Vec<ToolDefinition>,
         temperature: f32,
     ) -> Result<ChatResponse> {
+        if self.protocol == ProviderProtocol::AnthropicMessages {
+            return self.complete_anthropic(messages, tools, temperature).await;
+        }
         self.ensure_api_key()?;
         let response = self
-            .http
-            .post(format!("{}/chat/completions", self.base_url))
-            .bearer_auth(&self.api_key)
-            .json(&ChatRequest {
-                model: self.model.clone(),
-                messages,
-                tools,
-                temperature: self.send_temperature.then_some(temperature),
-                stream: false,
-            })
+            .authenticated(
+                self.http
+                    .post(format!("{}/chat/completions", self.base_url))
+                    .json(&ChatRequest {
+                        model: self.model.clone(),
+                        messages,
+                        tools,
+                        temperature: self.send_temperature.then_some(temperature),
+                        stream: false,
+                    }),
+            )
             .send()
             .await
             .context("send chat completion request")?;
@@ -131,18 +166,24 @@ impl LlmClient {
     where
         F: FnMut(LlmEvent),
     {
+        if self.protocol == ProviderProtocol::AnthropicMessages {
+            return self
+                .complete_stream_anthropic(messages, tools, temperature, emit)
+                .await;
+        }
         self.ensure_api_key()?;
         let response = self
-            .http
-            .post(format!("{}/chat/completions", self.base_url))
-            .bearer_auth(&self.api_key)
-            .json(&ChatRequest {
-                model: self.model.clone(),
-                messages: messages.clone(),
-                tools: tools.clone(),
-                temperature: self.send_temperature.then_some(temperature),
-                stream: true,
-            })
+            .authenticated(
+                self.http
+                    .post(format!("{}/chat/completions", self.base_url))
+                    .json(&ChatRequest {
+                        model: self.model.clone(),
+                        messages: messages.clone(),
+                        tools: tools.clone(),
+                        temperature: self.send_temperature.then_some(temperature),
+                        stream: true,
+                    }),
+            )
             .send()
             .await
             .context("send streaming chat completion request")?;
@@ -207,6 +248,124 @@ impl LlmClient {
         stream.finish()
     }
 
+    async fn complete_anthropic(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDefinition>,
+        temperature: f32,
+    ) -> Result<ChatResponse> {
+        self.ensure_api_key()?;
+        let response = self
+            .authenticated(
+                self.http
+                    .post(format!("{}/messages", self.base_url))
+                    .header("anthropic-version", "2023-06-01")
+                    .json(&anthropic::request(
+                        &self.model,
+                        &messages,
+                        &tools,
+                        temperature,
+                        self.send_temperature,
+                        false,
+                    )),
+            )
+            .send()
+            .await
+            .context("send Anthropic message request")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("read Anthropic message response")?;
+        if !status.is_success() {
+            bail!("LLM request failed ({}): {}", status, body);
+        }
+        anthropic::response(&body)
+    }
+
+    async fn complete_stream_anthropic<F>(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDefinition>,
+        temperature: f32,
+        mut emit: F,
+    ) -> Result<ChatStreamResponse>
+    where
+        F: FnMut(LlmEvent),
+    {
+        self.ensure_api_key()?;
+        let response = self
+            .authenticated(
+                self.http
+                    .post(format!("{}/messages", self.base_url))
+                    .header("anthropic-version", "2023-06-01")
+                    .json(&anthropic::request(
+                        &self.model,
+                        &messages,
+                        &tools,
+                        temperature,
+                        self.send_temperature,
+                        true,
+                    )),
+            )
+            .send()
+            .await
+            .context("send streaming Anthropic message request")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .context("read streaming Anthropic error")?;
+            if matches!(status.as_u16(), 400 | 404 | 405 | 415 | 422 | 501) {
+                return self
+                    .complete_anthropic(messages, tools, temperature)
+                    .await
+                    .and_then(|response| anthropic::stream_response(response, &mut emit));
+            }
+            bail!("LLM streaming request failed ({}): {}", status, body);
+        }
+
+        let is_event_stream = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream"));
+        if !is_event_stream {
+            let body = response
+                .text()
+                .await
+                .context("read non-streaming Anthropic response")?;
+            return anthropic::stream_response(anthropic::response(&body)?, &mut emit);
+        }
+
+        let mut bytes = response.bytes_stream();
+        let mut buffer = Vec::new();
+        let mut stream = anthropic::StreamAccumulator::default();
+        let mut done = false;
+        while let Some(chunk) = bytes.next().await {
+            buffer.extend_from_slice(&chunk.context("read streaming Anthropic chunk")?);
+            while let Some((event_end, delimiter_len)) = find_event_boundary(&buffer) {
+                let event = buffer.drain(..event_end).collect::<Vec<_>>();
+                buffer.drain(..delimiter_len);
+                let Some(data) = decode_sse_data(&event)? else {
+                    continue;
+                };
+                if stream.apply(&data, &mut emit)? {
+                    done = true;
+                    break;
+                }
+            }
+            if done {
+                break;
+            }
+        }
+        if !done {
+            bail!("Anthropic stream ended before message_stop");
+        }
+        stream.finish()
+    }
+
     async fn complete_non_stream_fallback<F>(
         &self,
         messages: Vec<ChatMessage>,
@@ -228,6 +387,13 @@ impl LlmClient {
             );
         }
         Ok(())
+    }
+
+    fn authenticated(&self, request: RequestBuilder) -> RequestBuilder {
+        match self.authentication {
+            AuthenticationMode::Bearer => request.bearer_auth(&self.api_key),
+            AuthenticationMode::XApiKey => request.header("x-api-key", &self.api_key),
+        }
     }
 }
 

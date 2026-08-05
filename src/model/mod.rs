@@ -16,6 +16,78 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderProtocol {
+    OpenaiCompatible,
+    AnthropicMessages,
+}
+
+impl Default for ProviderProtocol {
+    fn default() -> Self {
+        Self::OpenaiCompatible
+    }
+}
+
+impl fmt::Display for ProviderProtocol {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::OpenaiCompatible => "openai-compatible",
+            Self::AnthropicMessages => "anthropic-messages",
+        })
+    }
+}
+
+impl FromStr for ProviderProtocol {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "openai" | "openai-compatible" => Ok(Self::OpenaiCompatible),
+            "anthropic" | "anthropic-messages" => Ok(Self::AnthropicMessages),
+            unsupported => Err(format!(
+                "unsupported provider protocol '{unsupported}'; supported: openai-compatible, anthropic-messages"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthenticationMode {
+    Bearer,
+    XApiKey,
+}
+
+impl Default for AuthenticationMode {
+    fn default() -> Self {
+        Self::Bearer
+    }
+}
+
+impl fmt::Display for AuthenticationMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Bearer => "bearer",
+            Self::XApiKey => "x-api-key",
+        })
+    }
+}
+
+impl FromStr for AuthenticationMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "bearer" | "authorization" => Ok(Self::Bearer),
+            "x-api-key" | "x_api_key" | "xapikey" => Ok(Self::XApiKey),
+            unsupported => Err(format!(
+                "unsupported authentication mode '{unsupported}'; supported: bearer, x-api-key"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Model {
     OpenAi,
@@ -42,7 +114,7 @@ impl Model {
             Self::DeepSeek => "https://api.deepseek.com",
             Self::Qwen => "https://dashscope.aliyuncs.com/compatible-mode/v1",
             Self::Kimi => "https://api.moonshot.cn/v1",
-            Self::Claude => "https://openrouter.ai/api/v1",
+            Self::Claude => "https://api.anthropic.com/v1",
         }
     }
 
@@ -52,7 +124,7 @@ impl Model {
             Self::DeepSeek => "deepseek-v4-flash",
             Self::Qwen => "qwen3-coder-plus",
             Self::Kimi => "kimi-k3",
-            Self::Claude => "anthropic/claude-sonnet-4.5",
+            Self::Claude => "claude-sonnet-4.5",
         }
     }
 
@@ -72,7 +144,23 @@ impl Model {
             Self::DeepSeek => "DEEPSEEK_API_KEY",
             Self::Qwen => "DASHSCOPE_API_KEY",
             Self::Kimi => "MOONSHOT_API_KEY",
-            Self::Claude => "OPENROUTER_API_KEY",
+            Self::Claude => "ANTHROPIC_API_KEY",
+        }
+    }
+
+    pub const fn default_protocol(self) -> ProviderProtocol {
+        match self {
+            Self::Claude => ProviderProtocol::AnthropicMessages,
+            Self::OpenAi | Self::DeepSeek | Self::Qwen | Self::Kimi => {
+                ProviderProtocol::OpenaiCompatible
+            }
+        }
+    }
+
+    pub const fn default_authentication(self) -> AuthenticationMode {
+        match self {
+            Self::Claude => AuthenticationMode::XApiKey,
+            Self::OpenAi | Self::DeepSeek | Self::Qwen | Self::Kimi => AuthenticationMode::Bearer,
         }
     }
 
@@ -143,6 +231,10 @@ struct ModelCredential {
     base_url: Option<String>,
     #[serde(default)]
     model_id: Option<String>,
+    #[serde(default)]
+    protocol: ProviderProtocol,
+    #[serde(default)]
+    authentication: AuthenticationMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,6 +378,23 @@ impl CredentialStore {
     }
 
     pub fn login(&self, model: Model, api_key: &str, base_url: Option<&str>) -> Result<()> {
+        self.login_with_config(
+            model,
+            api_key,
+            base_url,
+            model.default_protocol(),
+            model.default_authentication(),
+        )
+    }
+
+    pub fn login_with_config(
+        &self,
+        model: Model,
+        api_key: &str,
+        base_url: Option<&str>,
+        protocol: ProviderProtocol,
+        authentication: AuthenticationMode,
+    ) -> Result<()> {
         let api_key = api_key.trim();
         if api_key.is_empty() {
             bail!("API key cannot be empty");
@@ -305,7 +414,13 @@ impl CredentialStore {
                 api_key: api_key.to_string(),
                 base_url: base_url.map(str::to_string),
                 model_id: None,
+                protocol,
+                authentication,
             });
+        if let Some(credential) = credentials.models.get_mut(model.id()) {
+            credential.protocol = protocol;
+            credential.authentication = authentication;
+        }
         credentials.active_model = Some(model);
         self.save(&credentials)
     }
@@ -340,6 +455,22 @@ impl CredentialStore {
             .models
             .get(model.id())
             .and_then(|credential| credential.base_url.clone()))
+    }
+
+    pub fn protocol(&self, model: Model) -> Result<Option<ProviderProtocol>> {
+        Ok(self
+            .load()?
+            .models
+            .get(model.id())
+            .map(|credential| credential.protocol))
+    }
+
+    pub fn authentication(&self, model: Model) -> Result<Option<AuthenticationMode>> {
+        Ok(self
+            .load()?
+            .models
+            .get(model.id())
+            .map(|credential| credential.authentication))
     }
 
     fn model_id(&self, model: Model) -> Result<Option<String>> {
@@ -420,6 +551,8 @@ pub struct ModelOverrides {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub model_id: Option<String>,
+    pub protocol: Option<ProviderProtocol>,
+    pub authentication: Option<AuthenticationMode>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -428,6 +561,8 @@ pub struct RuntimeModelConfig {
     pub api_key: String,
     pub base_url: String,
     pub model_id: String,
+    pub protocol: ProviderProtocol,
+    pub authentication: AuthenticationMode,
 }
 
 impl RuntimeModelConfig {
@@ -453,6 +588,14 @@ impl RuntimeModelConfig {
                 .model_id
                 .or(store.model_id(model)?)
                 .unwrap_or_else(|| model.default_model_id().to_string()),
+            protocol: overrides
+                .protocol
+                .or(store.protocol(model)?)
+                .unwrap_or_else(|| model.default_protocol()),
+            authentication: overrides
+                .authentication
+                .or(store.authentication(model)?)
+                .unwrap_or_else(|| model.default_authentication()),
         })
     }
 }
@@ -490,9 +633,11 @@ mod tests {
         assert!(qwen.supports_custom_temperature());
 
         let claude: Model = "claude".parse().unwrap();
-        assert_eq!(claude.base_url(), "https://openrouter.ai/api/v1");
-        assert_eq!(claude.default_model_id(), "anthropic/claude-sonnet-4.5");
-        assert_eq!(claude.api_key_env(), "OPENROUTER_API_KEY");
+        assert_eq!(claude.base_url(), "https://api.anthropic.com/v1");
+        assert_eq!(claude.default_model_id(), "claude-sonnet-4.5");
+        assert_eq!(claude.api_key_env(), "ANTHROPIC_API_KEY");
+        assert_eq!(claude.default_protocol(), ProviderProtocol::AnthropicMessages);
+        assert_eq!(claude.default_authentication(), AuthenticationMode::XApiKey);
 
         assert_eq!(
             Model::supported(),
@@ -524,6 +669,27 @@ mod tests {
             Some("https://gateway.example/v1")
         );
 
+        store
+            .login_with_config(
+                Model::Claude,
+                "native-key",
+                Some("http://192.168.0.6:3000/v1"),
+                ProviderProtocol::AnthropicMessages,
+                AuthenticationMode::Bearer,
+            )
+            .unwrap();
+        let native = RuntimeModelConfig::resolve(
+            ModelOverrides {
+                model: Some(Model::Claude),
+                ..ModelOverrides::default()
+            },
+            &store,
+        )
+        .unwrap();
+        assert_eq!(native.protocol, ProviderProtocol::AnthropicMessages);
+        assert_eq!(native.authentication, AuthenticationMode::Bearer);
+
+        assert!(store.logout(Model::Claude).unwrap());
         assert!(store.logout(Model::DeepSeek).unwrap());
         assert_eq!(store.api_key(Model::DeepSeek).unwrap(), None);
         assert_eq!(store.active_model().unwrap(), None);
@@ -591,6 +757,8 @@ mod tests {
         assert_eq!(configured.api_key, "stored-key");
         assert_eq!(configured.base_url, "https://api.deepseek.com");
         assert_eq!(configured.model_id, "deepseek-v4-flash");
+        assert_eq!(configured.protocol, ProviderProtocol::OpenaiCompatible);
+        assert_eq!(configured.authentication, AuthenticationMode::Bearer);
 
         let overridden = RuntimeModelConfig::resolve(
             ModelOverrides {
@@ -630,7 +798,9 @@ mod tests {
                     "deepseek": {
                         "api_key": "stored-key",
                         "base_url": "https://gateway.example/v1",
-                        "model_id": "deepseek-custom"
+                        "model_id": "deepseek-custom",
+                        "protocol": "openai-compatible",
+                        "authentication": "bearer"
                     }
                 }
             }"#,

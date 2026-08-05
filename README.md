@@ -15,7 +15,7 @@ Session Prompt ToolRegistry
    |      |       |
  JSONL workspace  read/list/search/navigation/patch/write/git/run
           |
-       LlmClient (OpenAI-compatible)
+       LlmClient (multi-protocol provider adapter)
 ```
 
 `Agent` is the runtime interface a host uses to submit turns and consume `AgentEvent` streams. `Session` is the durable source of conversation and model context; the LLM and tools remain adapters behind stable seams.
@@ -26,7 +26,7 @@ The source tree is organized by responsibility:
 src/
   cli/      CLI arguments, login/logout, and TUI startup
   agent/    turn loop, events, cancellation, optional approval, and prompt
-  llm/      OpenAI-compatible client, protocol DTOs, and SSE handling
+  llm/      provider adapters, protocol DTOs, and SSE handling
   model/    model catalog, runtime configuration, and local credentials
   session/  append-only JSONL, replay projections, recovery, and compaction
   tools/    tool registry, filesystem/patch/Git tools, and command execution
@@ -78,7 +78,7 @@ noya
 noya --workspace /path/to/repo
 ```
 
-`noya login <model>` first asks for the provider's `base_url` and then prompts for the API key. Press Enter at the URL prompt to keep the existing value or use the built-in default; enter a custom OpenAI-compatible endpoint to save it for that provider.
+`noya login <model>` saves the provider protocol, authentication mode, `base_url`, and API key. Use `--protocol` and `--auth-mode` to select non-default protocol or authentication behavior.
 
 `login` makes the selected model active, so it does not need to be specified on subsequent runs. `--workspace` is optional and defaults to the current directory:
 
@@ -88,7 +88,7 @@ noya
 
 When running from a source checkout, use `cargo run --` before Noya's arguments. For example, `noya login deepseek` becomes `cargo run -- login deepseek`, while a bare `noya` becomes `cargo run`.
 
-Noya currently supports `openai`, `deepseek`, `qwen`, `kimi`, and `claude` through OpenAI-compatible gateways:
+Noya currently supports `openai`, `deepseek`, `qwen`, `kimi`, and `claude`. Claude defaults to the native Anthropic Messages protocol; the other providers default to the OpenAI-compatible protocol:
 
 ```bash
 noya login openai
@@ -108,24 +108,29 @@ openai    gpt-4o              not logged in
 deepseek  deepseek-v4-flash   not logged in
 qwen      qwen3-coder-plus    active
 kimi      kimi-k3             not logged in
-claude    anthropic/claude-sonnet-4.5  not logged in
+claude    claude-sonnet-4.5           not logged in
 ```
 
 Default model configuration:
 
-| Model | Default endpoint | Default Model ID | API key environment variable |
-| --- | --- | --- | --- |
-| `openai` | `https://api.openai.com/v1` | `gpt-4o` | `OPENAI_API_KEY` |
-| `deepseek` | `https://api.deepseek.com` | `deepseek-v4-flash` | `DEEPSEEK_API_KEY` |
-| `qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3-coder-plus` | `DASHSCOPE_API_KEY` |
-| `claude` | `https://openrouter.ai/api/v1` | `anthropic/claude-sonnet-4.5` | `OPENROUTER_API_KEY` |
-| `kimi` | `https://api.moonshot.cn/v1` | `kimi-k3` | `MOONSHOT_API_KEY` |
+| Model | Default endpoint | Default Model ID | Protocol | Authentication | API key environment variable |
+| --- | --- | --- | --- | --- | --- |
+| `openai` | `https://api.openai.com/v1` | `gpt-4o` | `openai-compatible` | `bearer` | `OPENAI_API_KEY` |
+| `deepseek` | `https://api.deepseek.com` | `deepseek-v4-flash` | `openai-compatible` | `bearer` | `DEEPSEEK_API_KEY` |
+| `qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3-coder-plus` | `openai-compatible` | `bearer` | `DASHSCOPE_API_KEY` |
+| `claude` | `https://api.anthropic.com/v1` | `claude-sonnet-4.5` | `anthropic-messages` | `x-api-key` | `ANTHROPIC_API_KEY` |
+| `kimi` | `https://api.moonshot.cn/v1` | `kimi-k3` | `openai-compatible` | `bearer` | `MOONSHOT_API_KEY` |
 
 Credentials are stored in `~/.noya/credentials.json` under the current user's home directory. Set `NOYA_CONFIG_DIR` to use another credentials directory. The exact path is printed after a successful login. On Unix, the directory uses mode `0700` and the file uses mode `0600`. The environment variables above can also provide temporary credentials.
 
-Each provider can optionally override its OpenAI-compatible endpoint and model ID. Omitted values use Noya's built-in defaults:
+Each provider can configure its protocol, authentication mode, endpoint, and model ID. Protocols are `openai-compatible` and `anthropic-messages`; authentication modes are `bearer` and `x-api-key`.
 
-Claude uses an OpenAI-compatible gateway, not the native Anthropic Messages API. Set `base_url` to your gateway and use the gateway-issued API key.
+For example, configure the local native Anthropic service with:
+
+```bash
+noya login claude --protocol anthropic-messages --auth-mode bearer
+# Base URL: http://192.168.0.6:3000/v1
+```
 
 ```json
 {
@@ -134,12 +139,16 @@ Claude uses an OpenAI-compatible gateway, not the native Anthropic Messages API.
     "openai": {
       "api_key": "sk-...",
       "base_url": "https://api.openai.com/v1",
-      "model_id": "gpt-4o"
+      "model_id": "gpt-4o",
+      "protocol": "openai-compatible",
+      "authentication": "bearer"
     },
     "deepseek": {
       "api_key": "sk-...",
       "base_url": "https://gateway.example/v1",
-      "model_id": "deepseek-custom"
+      "model_id": "deepseek-custom",
+      "protocol": "openai-compatible",
+      "authentication": "bearer"
     }
   }
 }
@@ -162,11 +171,11 @@ The catalog uses this shape:
 }
 ```
 
-Command-line options take precedence over provider settings, which take precedence over built-in defaults. Running `noya login <model>` updates only that provider's API key and preserves its configured endpoint and model ID.
+Command-line options take precedence over provider settings, which take precedence over built-in defaults. `noya login <model>` saves that provider's protocol, authentication mode, endpoint, and API key.
 
 Noya starts in an inline TUI with a welcome header showing the installed version, active model and Model ID, and workspace directory. Type `/` to open the command menu, use ↑/↓ to select a command, Enter to apply it, Tab to complete it without running, and Esc to close the menu. Sent user messages are right-aligned and Agent output is left-aligned. Agent responses are streamed, rendered as Markdown, and written to native terminal scrollback while generation is still in progress. Supported Markdown includes headings, emphasis, inline code, code blocks, lists, blockquotes, and links. `/status` displays the active model and concrete Model ID.
 
-Use `/model` to open an interactive picker containing all supported providers and discovered model IDs. Select with ↑/↓, switch with Enter, or cancel with Esc. Selecting an unconfigured provider starts an in-TUI setup that asks for `base_url`, then a hidden API key, then discovers and displays the endpoint's model IDs. `/model <name>` remains available as a direct shortcut and can also use the model's API key environment variable. If a refreshed catalog no longer contains the current model ID, Noya silently selects the provider default when available, otherwise the first discovered model, and persists that choice.
+Use `/model` to open an interactive picker containing all supported providers and discovered model IDs. Selecting an unconfigured provider starts an in-TUI setup that asks for protocol, `base_url`, authentication mode, and a hidden API key, then discovers and displays the endpoint's model IDs. Select with ↑/↓ and Enter, or cancel with Esc.
 
 Each bare `noya` run creates a durable local session. `noya resume` continues the latest session for the current workspace; an ID prefix resumes a specific session:
 

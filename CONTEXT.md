@@ -5,11 +5,11 @@ This context defines the language used for configuring providers and discovering
 ## Model Configuration
 
 **Provider**:
-A named model-service boundary that supplies credentials, a base URL, and access to one or more models. Examples include OpenAI, DeepSeek, Qwen, Kimi, and Claude through an OpenAI-compatible gateway.
+A named model-service boundary that supplies credentials, a base URL, and access to one or more models through a declared provider protocol. Examples include OpenAI, DeepSeek, Qwen, Kimi, and Claude.
 _Avoid_: Model, vendor
 
 **Model ID**:
-The exact identifier understood by a provider for one concrete model, such as `anthropic/claude-sonnet-4.5`.
+The exact identifier understood by a provider for one concrete model, such as `claude-sonnet-5`.
 _Avoid_: Model name, provider
 
 **Model Catalog**:
@@ -17,8 +17,20 @@ The set of Model IDs exposed by a specific Provider endpoint at discovery time. 
 _Avoid_: Credentials, model configuration
 
 **Model Discovery**:
-The process of obtaining a Provider's current Model Catalog from its OpenAI-compatible model-list endpoint.
+The process of obtaining a Provider's current Model Catalog from its model-list endpoint.
 _Avoid_: Model configuration, credential refresh
+
+**Provider Protocol**:
+The wire contract a Provider uses for model discovery, conversation requests, streaming, and tool calls. Noya supports OpenAI-compatible and Anthropic Messages protocols as distinct contracts.
+_Avoid_: Model, endpoint
+
+**Authentication Mode**:
+The request-header convention used to present a Provider credential, such as Bearer authentication or the Anthropic `x-api-key` header.
+_Avoid_: API key, Provider Protocol
+
+**Anthropic Messages Protocol**:
+The native Anthropic conversation contract centered on `/messages`, including Anthropic content blocks, streaming events, and tool-use turns.
+_Avoid_: OpenAI-compatible protocol, Claude model
 
 **Model Selection Fallback**:
 The deterministic automatic choice used when a configured Model ID is no longer present in the latest Model Catalog: prefer the Provider default, then the first catalog entry.

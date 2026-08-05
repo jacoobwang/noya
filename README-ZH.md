@@ -15,7 +15,7 @@ Session Prompt ToolRegistry
    |      |       |
  JSONL workspace  read/list/search/patch/write/git/run
           |
-       LlmClient (OpenAI-compatible)
+       LlmClient (多协议 provider adapter)
 ```
 
 `Agent` 是 host 提交 turn、消费 `AgentEvent` 的 runtime 接口；`Session` 是对话和模型上下文的持久事实来源。LLM 和工具继续作为稳定 seam 后面的 adapter。
@@ -26,7 +26,7 @@ Session Prompt ToolRegistry
 src/
   cli/      CLI 参数、login/logout 和 TUI 启动入口
   agent/    turn loop、事件、取消、审批和 prompt
-  llm/      OpenAI-compatible client、协议 DTO 和 SSE
+  llm/      provider adapters、协议 DTO 和 SSE
   model/    model catalog、运行配置和本地凭证存储
   session/  append-only JSONL、重放 projection、恢复和压缩
   tools/    tool registry、文件/patch/Git 工具和命令工具
@@ -78,7 +78,7 @@ noya
 noya --workspace /path/to/repo
 ```
 
-执行 `noya login <model>` 时会先设置 provider 的 `base_url`，再隐藏输入 API key。地址提示处直接回车会保留已有地址或使用内置默认值；输入自定义 OpenAI 兼容接口地址后会保存到该 provider 的配置中。
+执行 `noya login <model>` 时会设置 provider 的协议、认证方式和 `base_url`，再隐藏输入 API key。地址提示处直接回车会保留已有地址或使用内置默认值；协议和认证方式也可以通过 `--protocol`、`--auth-mode` 指定。
 
 `login` 会把该 model 设为当前活动 model；之后启动时不需要再次指定。`--workspace` 也可以省略，默认使用当前目录：
 
@@ -88,7 +88,7 @@ noya
 
 如果从源码运行，在 Noya 参数前使用 `cargo run --`。例如，`noya login deepseek` 对应 `cargo run -- login deepseek`，裸 `noya` 对应 `cargo run`。
 
-目前支持 `openai`、`deepseek`、`qwen`、`kimi` 和 `claude`；Claude 通过 OpenAI 兼容网关接入：
+目前支持 `openai`、`deepseek`、`qwen`、`kimi` 和 `claude`。Claude 默认使用 Anthropic 原生 Messages 协议；其他 provider 默认使用 OpenAI 兼容协议：
 
 ```bash
 noya login openai
@@ -108,24 +108,29 @@ openai    gpt-4o              not logged in
 deepseek  deepseek-v4-flash   not logged in
 qwen      qwen3-coder-plus    active
 kimi      kimi-k3             not logged in
-claude    anthropic/claude-sonnet-4.5  not logged in
+claude    claude-sonnet-4.5           not logged in
 ```
 
 各 model 的默认配置：
 
-| Model | 默认 endpoint | 默认 Model ID | API key 环境变量 |
-| --- | --- | --- | --- |
-| `openai` | `https://api.openai.com/v1` | `gpt-4o` | `OPENAI_API_KEY` |
-| `deepseek` | `https://api.deepseek.com` | `deepseek-v4-flash` | `DEEPSEEK_API_KEY` |
-| `qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3-coder-plus` | `DASHSCOPE_API_KEY` |
-| `claude` | `https://openrouter.ai/api/v1` | `anthropic/claude-sonnet-4.5` | `OPENROUTER_API_KEY` |
-| `kimi` | `https://api.moonshot.cn/v1` | `kimi-k3` | `MOONSHOT_API_KEY` |
+| Model | 默认 endpoint | 默认 Model ID | 协议 | 认证 | API key 环境变量 |
+| --- | --- | --- | --- | --- | --- |
+| `openai` | `https://api.openai.com/v1` | `gpt-4o` | `openai-compatible` | `bearer` | `OPENAI_API_KEY` |
+| `deepseek` | `https://api.deepseek.com` | `deepseek-v4-flash` | `openai-compatible` | `bearer` | `DEEPSEEK_API_KEY` |
+| `qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3-coder-plus` | `openai-compatible` | `bearer` | `DASHSCOPE_API_KEY` |
+| `claude` | `https://api.anthropic.com/v1` | `claude-sonnet-4.5` | `anthropic-messages` | `x-api-key` | `ANTHROPIC_API_KEY` |
+| `kimi` | `https://api.moonshot.cn/v1` | `kimi-k3` | `openai-compatible` | `bearer` | `MOONSHOT_API_KEY` |
 
 凭证保存在当前用户 home 目录下的 `~/.noya/credentials.json` 中。设置 `NOYA_CONFIG_DIR` 可以使用其他凭证目录。实际路径会在登录成功后输出；Unix 下目录权限为 `0700`，文件权限为 `0600`。也可以用上表中的环境变量临时提供凭证。
 
-每个 provider 都可以单独配置 OpenAI 兼容接口地址和模型 ID；省略时使用 Noya 内置默认值：
+每个 provider 都可以单独配置协议、认证方式、接口地址和模型 ID；省略时使用 Noya 内置默认值：
 
-Claude 使用 OpenAI 兼容网关，不是 Anthropic 原生 Messages API。请将 `base_url` 设置为你的网关地址，并使用网关分配的 API key。
+协议可选 `openai-compatible` 或 `anthropic-messages`；认证方式可选 `bearer` 或 `x-api-key`。例如本地 Anthropic 服务可以这样登录：
+
+```bash
+noya login claude --protocol anthropic-messages --auth-mode bearer
+# Base URL: http://192.168.0.6:3000/v1
+```
 
 ```json
 {
@@ -134,22 +139,26 @@ Claude 使用 OpenAI 兼容网关，不是 Anthropic 原生 Messages API。请�
     "openai": {
       "api_key": "sk-...",
       "base_url": "https://api.openai.com/v1",
-      "model_id": "gpt-4o"
+      "model_id": "gpt-4o",
+      "protocol": "openai-compatible",
+      "authentication": "bearer"
     },
     "deepseek": {
       "api_key": "sk-...",
       "base_url": "https://gateway.example/v1",
-      "model_id": "deepseek-custom"
+      "model_id": "deepseek-custom",
+      "protocol": "openai-compatible",
+      "authentication": "bearer"
     }
   }
 }
 ```
 
-优先级为：命令行参数 > provider 配置 > 内置默认值。执行 `noya login <model>` 只会更新该 provider 的 API key，不会覆盖已配置的接口地址和模型 ID。
+优先级为：命令行参数 > provider 配置 > 内置默认值。`noya login <model>` 会保存该 provider 的协议、认证方式、接口地址和 API key。
 
 启动后进入 inline TUI，欢迎区会显示当前 Noya 版本、活动 model、实际 Model ID 和 workspace 目录。输入 `/` 打开命令菜单，使用 ↑/↓ 选择命令，Enter 应用命令，Tab 只补全而不执行，Esc 关闭菜单。已经发送的用户消息右对齐，Agent 输出左对齐；Agent 回复会边生成、边渲染 Markdown、边写入终端原生 scrollback，不需要等待回答结束才能查看完整输出。支持标题、强调、行内代码、代码块、列表、引用和链接；`/status` 会显示当前 model 和实际 Model ID。
 
-使用 `/model` 打开交互式选择器，其中只显示通过 `noya login` 配置过的 model；使用 ↑/↓ 选择、Enter 切换、Esc 取消。仍可使用 `/model <name>` 直接切换，这种方式也支持对应的 API key 环境变量。切换后保留现有对话上下文，并持久化到当前 session；同一 TUI 内的 `/new` 会继承切换后的 model，但不会修改以后重新启动 Noya 时使用的登录默认 model。
+使用 `/model` 打开交互式选择器，其中只显示通过 `noya login` 配置过的 model；配置新 provider 时会依次询问协议、Base URL、认证方式和 API key，然后发现模型。使用 ↑/↓ 选择、Enter 切换、Esc 取消。切换后保留现有对话上下文，并持久化到当前 session。
 
 裸 `noya` 每次创建一个可持久恢复的本地 session。`noya resume` 恢复当前 workspace 最近的 session，也可以使用 ID 前缀恢复指定 session：
 

@@ -2,7 +2,10 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use noya::{
     Agent, AgentConfig, LlmClient,
-    model::{CredentialStore, Model, ModelOverrides, ModelStatus, RuntimeModelConfig},
+    model::{
+        AuthenticationMode, CredentialStore, Model, ModelOverrides, ModelStatus,
+        ProviderProtocol, RuntimeModelConfig,
+    },
     session::{CreateSession, ExportFormat, SessionFilter, SessionManager, SessionSummary},
     tui,
 };
@@ -66,6 +69,12 @@ enum Command {
         /// Model to configure.
         #[arg(default_value = "openai")]
         model: Model,
+        /// Provider protocol: openai-compatible or anthropic-messages.
+        #[arg(long)]
+        protocol: Option<String>,
+        /// Authentication mode: bearer or x-api-key.
+        #[arg(long)]
+        auth_mode: Option<String>,
     },
     /// Remove the selected model credential.
     Logout {
@@ -137,7 +146,11 @@ pub async fn run(mut cli: Cli) -> Result<()> {
 
 async fn run_with_store(cli: Cli, command: Option<Command>, store: &CredentialStore) -> Result<()> {
     match command {
-        Some(Command::Login { model }) => login(model, store),
+        Some(Command::Login {
+            model,
+            protocol,
+            auth_mode,
+        }) => login(model, protocol, auth_mode, store),
         Some(Command::Logout { model }) => logout(model, store),
         Some(Command::Models) => models(store),
         Some(Command::Resume { session_id }) => resume_agent(cli, store, session_id).await,
@@ -236,16 +249,35 @@ fn is_development_binary(path: &Path) -> bool {
         .any(|component| component.as_os_str() == "target")
 }
 
-fn login(model: Model, store: &CredentialStore) -> Result<()> {
+fn login(
+    model: Model,
+    protocol: Option<String>,
+    auth_mode: Option<String>,
+    store: &CredentialStore,
+) -> Result<()> {
+    let protocol = protocol
+        .map(|value| value.parse::<ProviderProtocol>().map_err(anyhow::Error::msg))
+        .transpose()?
+        .unwrap_or_else(|| model.default_protocol());
+    let authentication = auth_mode
+        .map(|value| value.parse::<AuthenticationMode>().map_err(anyhow::Error::msg))
+        .transpose()?
+        .unwrap_or_else(|| model.default_authentication());
     let default_base_url = store
         .base_url(model)?
         .unwrap_or_else(|| model.base_url().to_string());
     let base_url = prompt_base_url(&default_base_url)?;
     let api_key = rpassword::prompt_password(format!("{}: ", model.api_key_label()))
         .context("read API key")?;
-    store.login(model, &api_key, Some(&base_url))?;
+    store.login_with_config(
+        model,
+        &api_key,
+        Some(&base_url),
+        protocol,
+        authentication,
+    )?;
     println!(
-        "Logged in to {model}. Credential saved to {}.",
+        "Logged in to {model} using {protocol} and {authentication}. Credential saved to {}.",
         store.path().display()
     );
     Ok(())
@@ -405,7 +437,14 @@ async fn run_tui(
             max_tool_output_bytes: cli.max_tool_output_bytes,
             temperature: 0.2,
         },
-        LlmClient::new(model.base_url, model.api_key, model.model_id.clone())
+        LlmClient::with_settings(
+            reqwest::Client::new(),
+            model.base_url,
+            model.api_key,
+            model.model_id.clone(),
+            model.protocol,
+            model.authentication,
+        )
             .with_custom_temperature(model.model.supports_custom_temperature()),
         session,
         model.model.to_string(),
@@ -519,7 +558,8 @@ mod tests {
         assert!(matches!(
             login.command,
             Some(Command::Login {
-                model: Model::DeepSeek
+                model: Model::DeepSeek,
+                ..
             })
         ));
 
@@ -534,7 +574,10 @@ mod tests {
         let qwen = Cli::try_parse_from(["noya", "login", "qwen"]).unwrap();
         assert!(matches!(
             qwen.command,
-            Some(Command::Login { model: Model::Qwen })
+            Some(Command::Login {
+                model: Model::Qwen,
+                ..
+            })
         ));
 
         let kimi = Cli::try_parse_from(["noya", "logout", "kimi"]).unwrap();
@@ -592,7 +635,8 @@ mod tests {
         assert!(matches!(
             login.command,
             Some(Command::Login {
-                model: Model::OpenAi
+                model: Model::OpenAi,
+                ..
             })
         ));
 
