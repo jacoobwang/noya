@@ -53,6 +53,7 @@ NOYA_SKIP_RIPGREP=1 sh scripts/install.sh
 An installed Noya binary can update or remove itself:
 
 ```bash
+noya --version             # show the current version
 noya upgrade                 # install the latest release
 noya upgrade --version v0.3.0
 noya uninstall               # confirm before removing the binary

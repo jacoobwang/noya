@@ -17,7 +17,11 @@ use std::{
 };
 
 #[derive(Parser)]
-#[command(name = "noya", about = "A coding agent for repository tasks")]
+#[command(
+    name = "noya",
+    version = env!("CARGO_PKG_VERSION"),
+    about = "A coding agent for repository tasks"
+)]
 pub struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -551,6 +555,16 @@ mod tests {
     use super::*;
     use clap::Parser;
     use noya::model::Model;
+
+    #[test]
+    fn parses_version_option() {
+        let error = match Cli::try_parse_from(["noya", "--version"]) {
+            Ok(_) => panic!("--version should exit during argument parsing"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
+    }
 
     #[test]
     fn parses_model_login_logout_and_models_commands() {

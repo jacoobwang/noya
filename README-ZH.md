@@ -53,6 +53,7 @@ NOYA_SKIP_RIPGREP=1 sh scripts/install.sh
 已安装的 Noya 可以直接升级或卸载：
 
 ```bash
+noya --version             # 查看当前版本
 noya upgrade                 # 升级到最新版本
 noya upgrade --version v0.3.0
 noya uninstall               # 确认后删除可执行文件
