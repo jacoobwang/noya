@@ -22,6 +22,7 @@ pub const VIEWPORT_HEIGHT: u16 = 9;
 const INPUT_PROMPT: &str = "> ";
 const COMMAND_MENU_HEIGHT: u16 = 6;
 const COMMAND_MENU_MAX_VISIBLE: usize = 5;
+const TOOL_MESSAGE_MAX_LINES: usize = 3;
 const WIDE_WELCOME_MIN_WIDTH: usize = 68;
 const NOYA_LOGO: [&str; 5] = [
     "█   █  ███  █   █  ███",
@@ -376,6 +377,9 @@ pub fn message_lines(message: &Message, width: usize) -> Vec<Line<'static>> {
                 }
             }
         }
+        if message.kind == MessageKind::Tool {
+            limit_tool_message_lines(&mut lines, content_style);
+        }
     }
     lines.push(Line::default());
     let alignment = if message.kind == MessageKind::User {
@@ -387,6 +391,18 @@ pub fn message_lines(message: &Message, width: usize) -> Vec<Line<'static>> {
         line.alignment = Some(alignment);
     }
     lines
+}
+
+fn limit_tool_message_lines(lines: &mut Vec<Line<'static>>, content_style: Style) {
+    if lines.len() <= TOOL_MESSAGE_MAX_LINES {
+        return;
+    }
+
+    lines.truncate(TOOL_MESSAGE_MAX_LINES);
+    if let Some(last) = lines.last_mut() {
+        last.spans
+            .push(Span::styled(" …", content_style));
+    }
 }
 
 pub fn render_transcript_buffer(lines: Vec<Line<'static>>, buffer: &mut Buffer) {
@@ -734,6 +750,25 @@ mod tests {
         assert_eq!(label_style.fg, Some(Color::LightMagenta));
         assert!(label_style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(content_style.fg, Some(Color::Gray));
+    }
+
+    #[test]
+    fn tool_messages_are_limited_to_three_visible_lines() {
+        let message = Message::new(
+            MessageKind::Tool,
+            "run_command this is a very long tool invocation that should be truncated",
+        );
+
+        let lines = message_lines(&message, 24);
+        let visible = &lines[..lines.len() - 1];
+        let rendered = visible
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(visible.len(), TOOL_MESSAGE_MAX_LINES);
+        assert!(rendered.ends_with("…"));
     }
 
     #[test]
