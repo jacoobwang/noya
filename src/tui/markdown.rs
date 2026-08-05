@@ -105,7 +105,7 @@ impl Renderer {
             Event::Code(code) => {
                 let style = self.current_style().patch(
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(Color::LightMagenta)
                         .bg(Color::Rgb(35, 35, 35)),
                 );
                 self.append(&code, style);
@@ -684,6 +684,9 @@ mod tests {
         assert!(rendered.contains("docs (https://example.com)"));
         assert!(lines.iter().flat_map(|line| &line.spans).any(|span| {
             span.content == "重点" && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
+        assert!(lines.iter().flat_map(|line| &line.spans).any(|span| {
+            span.content == "code" && span.style.fg == Some(Color::LightMagenta)
         }));
     }
 
