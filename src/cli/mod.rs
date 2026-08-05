@@ -362,6 +362,7 @@ async fn run_new_agent(cli: Cli, store: &CredentialStore) -> Result<()> {
             api_key: cli.api_key.clone(),
             base_url: cli.base_url.clone(),
             model_id: cli.model_id.clone(),
+            ..ModelOverrides::default()
         },
         store,
     )?;
@@ -420,6 +421,7 @@ async fn resume_agent(
             api_key: cli.api_key.clone(),
             base_url: cli.base_url.clone(),
             model_id: resumed_model_id,
+            ..ModelOverrides::default()
         },
         store,
     )?;
