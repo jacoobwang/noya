@@ -347,7 +347,11 @@ impl App {
                 ));
                 if turn_id.is_none() {
                     self.finish_streaming_message();
-                    self.agent_state = AgentState::Error;
+                    self.agent_state = if recoverable {
+                        AgentState::Idle
+                    } else {
+                        AgentState::Error
+                    };
                     self.mode = AppMode::Normal;
                     self.pending_approval = None;
                     self.model_choices.clear();
@@ -1111,6 +1115,23 @@ mod tests {
         assert!(!app.messages[0].is_streaming);
         assert_eq!(app.agent_state, AgentState::Idle);
         assert_eq!(app.messages[1].kind, MessageKind::Error);
+    }
+
+    #[test]
+    fn recoverable_turn_error_returns_to_idle_for_retry() {
+        let mut app = app();
+        app.handle_agent_event(AgentEvent::TurnStarted {
+            turn_id: TurnId::new(),
+        });
+
+        app.handle_agent_event(AgentEvent::Error {
+            turn_id: None,
+            message: "provider unavailable".to_string(),
+            recoverable: true,
+        });
+
+        assert_eq!(app.agent_state, AgentState::Idle);
+        assert_eq!(app.handle_submission("/retry".to_string()), TuiAction::Retry);
     }
 
     #[test]
