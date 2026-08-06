@@ -240,3 +240,21 @@ run_command  在 workspace 中执行非交互 shell 命令
 1. 为 `run_command` 增加 sandbox adapter，并为未来的高风险 tool 提供可选 policy。
 2. 增加 HTTP/SSE host，并严格区分 durable session replay 与 transport replay。
 3. 增加 opt-in secret redaction 和远程备份 adapter，同时保留本地 JSONL 事实来源。
+
+## Skills
+
+Noya 支持可选的 Skill 指令包。Skill 只提供 Markdown 工作指令，不会新增工具权限，也不会自动执行包内脚本。
+
+发现位置为：
+
+- 当前 workspace 的 .agents/skills/<name>/SKILL.md
+- 用户目录的 ~/.noya/skills/<name>/SKILL.md
+
+项目级 Skill 覆盖同名用户级 Skill。进入 TUI 后可以使用：
+
+    /skills              # 列出已发现的 Skill
+    /skill <name>        # 激活 Skill
+    /skill off <name>    # 停用 Skill
+    /skill show <name>   # 查看来源、digest 和状态
+
+Skill 激活状态会随当前 session 持久化，并在恢复时校验文件 digest；如果 Skill 被删除或修改，Noya 会拒绝静默继续并报告明确诊断。SKILL.md 必须包含 name 和 description frontmatter；目录内可放置 references/、scripts/ 和 assets/，但第一版不会自动执行脚本。

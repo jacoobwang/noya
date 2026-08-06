@@ -1,9 +1,9 @@
 use super::{
     compaction::KEEP_RECENT_TURNS,
     event::{EventEnvelope, SCHEMA_VERSION, SessionEvent},
-    model::{
-        CompactionPlan, ModelContext, SessionStatus, SessionSummary, Transcript, TranscriptItem,
-        TranscriptKind, TurnId,
+        model::{
+        ActiveSkillRecord, CompactionPlan, ModelContext, SessionStatus, SessionSummary, Transcript,
+        TranscriptItem, TranscriptKind, TurnId,
     },
 };
 use crate::llm::ChatMessage;
@@ -72,7 +72,8 @@ impl Projection {
                 context_epoch: 0,
                 compaction_through_seq: None,
                 parent_session_id: created.parent_session_id,
-                archived: false,
+            archived: false,
+            active_skills: Vec::new(),
             },
             committed: Vec::new(),
             completed: Vec::new(),
@@ -123,6 +124,26 @@ impl Projection {
                     snapshot.workspace == self.meta.workspace,
                     "runtime workspace does not match session"
                 );
+            }
+            SessionEvent::SkillActivated { name, source, digest, order } => {
+                ensure!(self.active.is_none(), "cannot activate a Skill during an active turn");
+                ensure!(!name.trim().is_empty(), "Skill name cannot be empty");
+                ensure!(!digest.trim().is_empty(), "Skill digest cannot be empty");
+                ensure!(
+                    self.meta.active_skills.iter().all(|active| active.name != *name),
+                    "Skill {name} is already active"
+                );
+                self.meta.active_skills.push(ActiveSkillRecord {
+                    name: name.clone(),
+                    source: source.clone(),
+                    digest: digest.clone(),
+                    order: *order,
+                });
+                self.meta.active_skills.sort_by_key(|active| active.order);
+            }
+            SessionEvent::SkillDeactivated { name } => {
+                ensure!(self.active.is_none(), "cannot deactivate a Skill during an active turn");
+                self.meta.active_skills.retain(|active| active.name != *name);
             }
             SessionEvent::TitleChanged { title } => self.meta.title = title.clone(),
             SessionEvent::ModelChanged { model, model_id } => {
@@ -413,6 +434,10 @@ impl Projection {
 
     pub fn summary(&self) -> SessionSummary {
         self.meta.clone()
+    }
+
+    pub fn active_skills(&self) -> Vec<ActiveSkillRecord> {
+        self.meta.active_skills.clone()
     }
 
     pub fn transcript(&self) -> Transcript {

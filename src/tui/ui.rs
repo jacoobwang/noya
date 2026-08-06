@@ -832,7 +832,7 @@ mod tests {
         assert!(rendered.contains("› new"));
         assert!(rendered.contains("Start a new session"));
         assert!(rendered.contains("↑/↓ navigate"));
-        assert!(rendered.contains("(1/13)"));
+        assert!(rendered.contains("(1/14)"));
     }
 
     #[test]

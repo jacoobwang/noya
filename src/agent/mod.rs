@@ -19,9 +19,10 @@ use crate::{
     llm::{ChatMessage, LlmClient, LlmEvent},
     model::Model,
     session::{
-        AssistantRecord, CompactionRecord, RunId, RuntimeSnapshot, Session, SessionSummary,
-        ToolCallRecord, ToolResultRecord, Transcript, TurnFailure, TurnId,
+        ActiveSkillRecord, AssistantRecord, CompactionRecord, RunId, RuntimeSnapshot, Session,
+        SessionSummary, ToolCallRecord, ToolResultRecord, Transcript, TurnFailure, TurnId,
     },
+    skills::{SkillInfo, SkillRegistry},
     tools::ToolRegistry,
 };
 
@@ -41,6 +42,7 @@ pub struct Agent {
     config: AgentConfig,
     llm: LlmClient,
     tools: ToolRegistry,
+    skills: SkillRegistry,
     session: Session,
     system_prompt: String,
     run_id: RunId,
@@ -85,8 +87,14 @@ impl Agent {
         );
         let model = model.into();
         session.change_model(model.clone(), llm.model_id().to_string())?;
-        let system = prompt::build(&config.workspace)?;
+        let skills = SkillRegistry::discover(&config.workspace)?;
+        for warning in skills.warnings() {
+            tracing::warn!("{warning}");
+        }
+        let active = active_skill_prompts(&skills, &session.active_skills())?;
+        let system = prompt::build(&config.workspace, &active)?;
         let tools = ToolRegistry::coding_defaults(config.workspace.clone());
+        let active_records = session.active_skills();
         let run_id = start_runtime(
             &mut session,
             &config,
@@ -94,9 +102,11 @@ impl Agent {
             &system,
             &model,
             llm.model_id(),
+            &active_records,
         )?;
         Ok(Self {
             tools,
+            skills,
             config,
             llm,
             session,
@@ -121,6 +131,57 @@ impl Agent {
         self.session.log_path()
     }
 
+    pub fn list_skills(&self) -> (Vec<SkillInfo>, Vec<String>) {
+        (self.skills.list(), self.skills.warnings().to_vec())
+    }
+
+    pub fn active_skills(&self) -> Vec<ActiveSkillRecord> {
+        self.session.active_skills()
+    }
+
+    pub fn activate_skill(&mut self, name: &str) -> Result<SkillInfo> {
+        let info = self
+            .skills
+            .get(name)
+            .cloned()
+            .with_context(|| format!("Skill '{name}' was not found"))?;
+        let mut active = self.session.active_skills();
+        if active.iter().any(|active| active.name == name) {
+            return Ok(info);
+        }
+        let record = ActiveSkillRecord {
+            name: info.name.clone(),
+            source: info.source.to_string(),
+            digest: info.digest.clone(),
+            order: active.len(),
+        };
+        active.push(record.clone());
+        let prompts = active_skill_prompts(&self.skills, &active)?;
+        let system = prompt::build(&self.config.workspace, &prompts)?;
+        self.session.activate_skill(record)?;
+        self.system_prompt = system;
+        self.restart_runtime()?;
+        Ok(info)
+    }
+
+    pub fn deactivate_skill(&mut self, name: &str) -> Result<()> {
+        ensure!(
+            self.session.active_skills().iter().any(|active| active.name == name),
+            "Skill '{name}' is not active"
+        );
+        self.session.deactivate_skill(name)?;
+        self.system_prompt = self.build_system_prompt()?;
+        self.restart_runtime()?;
+        Ok(())
+    }
+
+    pub fn skill_info(&self, name: &str) -> Result<SkillInfo> {
+        self.skills
+            .get(name)
+            .cloned()
+            .with_context(|| format!("Skill '{name}' was not found"))
+    }
+
     pub fn rename_session(&mut self, title: impl Into<String>) -> Result<()> {
         self.session.rename(title)
     }
@@ -132,15 +193,20 @@ impl Agent {
         );
         let model = self.session.summary().model;
         session.change_model(model.clone(), self.llm.model_id().to_string())?;
+        let active = active_skill_prompts(&self.skills, &session.active_skills())?;
+        let system = prompt::build(&self.config.workspace, &active)?;
+        let active_records = session.active_skills();
         let run_id = start_runtime(
             &mut session,
             &self.config,
             &self.tools,
-            &self.system_prompt,
+            &system,
             &model,
             self.llm.model_id(),
+            &active_records,
         )?;
         self.session = session;
+        self.system_prompt = system;
         self.run_id = run_id;
         Ok(())
     }
@@ -149,6 +215,7 @@ impl Agent {
         let model = model.into();
         let model_id = llm.model_id().to_string();
         self.session.change_model(model.clone(), model_id.clone())?;
+        let active_records = self.session.active_skills();
         let run_id = start_runtime(
             &mut self.session,
             &self.config,
@@ -156,6 +223,7 @@ impl Agent {
             &self.system_prompt,
             &model,
             &model_id,
+            &active_records,
         )?;
         self.llm = llm;
         self.run_id = run_id;
@@ -502,6 +570,27 @@ impl Agent {
     pub fn reset(&mut self) -> Result<()> {
         self.session.reset_context()
     }
+
+    fn build_system_prompt(&self) -> Result<String> {
+        let active = self.session.active_skills();
+        let prompts = active_skill_prompts(&self.skills, &active)?;
+        prompt::build(&self.config.workspace, &prompts)
+    }
+
+    fn restart_runtime(&mut self) -> Result<()> {
+        let active_records = self.session.active_skills();
+        let model = self.session.summary().model;
+        self.run_id = start_runtime(
+            &mut self.session,
+            &self.config,
+            &self.tools,
+            &self.system_prompt,
+            &model,
+            self.llm.model_id(),
+            &active_records,
+        )?;
+        Ok(())
+    }
 }
 
 fn start_runtime(
@@ -511,6 +600,7 @@ fn start_runtime(
     system_prompt: &str,
     model: &str,
     model_id: &str,
+    active_skills: &[ActiveSkillRecord],
 ) -> Result<RunId> {
     session.start_runtime(RuntimeSnapshot {
         noya_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -527,7 +617,35 @@ fn start_runtime(
         tool_timeout_ms: config.tool_timeout.as_millis().min(u64::MAX as u128) as u64,
         max_tool_output_bytes: config.max_tool_output_bytes,
         temperature: Some(config.temperature),
+        active_skills: active_skills.to_vec(),
     })
+}
+
+fn active_skill_prompts<'a>(
+    registry: &'a SkillRegistry,
+    active: &[ActiveSkillRecord],
+) -> Result<Vec<(&'a SkillInfo, &'a str)>> {
+    let mut ordered = active.to_vec();
+    ordered.sort_by_key(|skill| skill.order);
+    ordered
+        .iter()
+        .map(|record| {
+            let info = registry
+                .get(&record.name)
+                .with_context(|| format!("active Skill '{}' is no longer available", record.name))?;
+            ensure!(
+                info.digest == record.digest,
+                "active Skill '{}' changed on disk (expected {}, found {})",
+                record.name,
+                record.digest,
+                info.digest
+            );
+            let body = registry
+                .body(&record.name)
+                .with_context(|| format!("active Skill '{}' has no body", record.name))?;
+            Ok((info, body))
+        })
+        .collect()
 }
 
 async fn execute_tool(

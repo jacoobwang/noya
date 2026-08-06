@@ -53,3 +53,25 @@ _Avoid_: Text match, grep result
 **Text Search Fallback**:
 A plain-text search result used when workspace-symbol navigation has no available Language Server; it is not treated as a semantic definition or reference.
 _Avoid_: Semantic fallback, inferred definition
+
+## Skills
+
+**Skill**:
+A named package of Markdown instructions and repository-local resources that changes how an agent works without adding executable authority.
+_Avoid_: Tool, plugin, prompt template
+
+**Skill Package**:
+A directory containing a required SKILL.md and optional resources such as references, scripts, and assets.
+_Avoid_: Extension, executable plugin
+
+**Skill Activation**:
+The explicit, session-scoped decision to include a Skill's instructions in the agent system prompt.
+_Avoid_: Skill discovery, automatic loading
+
+**Skill Discovery**:
+The process of scanning the workspace and user Skill roots for valid Skill Packages without activating them.
+_Avoid_: Skill activation, plugin installation
+
+**Active Skill Set**:
+The ordered set of Skills currently included in a Session's system prompt.
+_Avoid_: Installed skills, tool registry

@@ -64,6 +64,10 @@ enum AgentCommand {
     Reset,
     NewSession,
     ListModels,
+    ListSkills,
+    ActivateSkill(String),
+    DeactivateSkill(String),
+    ShowSkill(String),
     SwitchModel(String),
     SwitchModelTo {
         model: String,
@@ -323,6 +327,18 @@ fn apply_action(
         }
         TuiAction::ListModels => {
             let _ = command_tx.send(AgentCommand::ListModels);
+        }
+        TuiAction::ListSkills => {
+            let _ = command_tx.send(AgentCommand::ListSkills);
+        }
+        TuiAction::ActivateSkill(name) => {
+            let _ = command_tx.send(AgentCommand::ActivateSkill(name));
+        }
+        TuiAction::DeactivateSkill(name) => {
+            let _ = command_tx.send(AgentCommand::DeactivateSkill(name));
+        }
+        TuiAction::ShowSkill(name) => {
+            let _ = command_tx.send(AgentCommand::ShowSkill(name));
         }
         TuiAction::SwitchModel(model) => {
             let _ = command_tx.send(AgentCommand::SwitchModel(model));
@@ -649,6 +665,10 @@ fn spawn_agent_host(
                                 | Some(AgentCommand::NewSession)
                                 | Some(AgentCommand::SwitchModel(_))
                                 | Some(AgentCommand::SwitchModelTo { .. })
+                                | Some(AgentCommand::ActivateSkill(_))
+                                | Some(AgentCommand::DeactivateSkill(_))
+                                | Some(AgentCommand::ShowSkill(_))
+                                | Some(AgentCommand::ListSkills)
                                 | Some(AgentCommand::FetchModelChoices { .. })
                                 | Some(AgentCommand::ConfigureModel { .. })
                                 | Some(AgentCommand::ResumeSession(_))
@@ -715,6 +735,54 @@ fn spawn_agent_host(
                         &agent.session_summary(),
                     );
                 }
+                AgentCommand::ListSkills => send_skill_list(&event_tx, &agent),
+                AgentCommand::ActivateSkill(name) => match agent.activate_skill(&name) {
+                    Ok(info) => {
+                        let _ = event_tx.send(HostEvent::Notice(format!(
+                            "Activated Skill '{}' ({}, {}).",
+                            info.name, info.source, info.digest
+                        )));
+                        let _ = event_tx.send(session_updated(&agent));
+                    }
+                    Err(error) => send_host_error(
+                        &event_tx,
+                        &format!("Failed to activate Skill '{name}': {error}"),
+                    ),
+                },
+                AgentCommand::DeactivateSkill(name) => match agent.deactivate_skill(&name) {
+                    Ok(()) => {
+                        let _ = event_tx.send(HostEvent::Notice(format!(
+                            "Deactivated Skill '{name}'."
+                        )));
+                        let _ = event_tx.send(session_updated(&agent));
+                    }
+                    Err(error) => send_host_error(
+                        &event_tx,
+                        &format!("Failed to deactivate Skill '{name}': {error}"),
+                    ),
+                },
+                AgentCommand::ShowSkill(name) => match agent.skill_info(&name) {
+                    Ok(info) => {
+                        let active = agent
+                            .active_skills()
+                            .iter()
+                            .any(|skill| skill.name == info.name);
+                        let _ = event_tx.send(HostEvent::Notice(format!(
+                            "Skill: {}\nDescription: {}\nSource: {}\nPath: {}\nDigest: {}\nModel invocation disabled: {}\nActive: {}",
+                            info.name,
+                            info.description,
+                            info.source,
+                            info.path.display(),
+                            info.digest,
+                            info.disable_model_invocation,
+                            active
+                        )));
+                    }
+                    Err(error) => send_host_error(
+                        &event_tx,
+                        &format!("Failed to show Skill '{name}': {error}"),
+                    ),
+                },
                 AgentCommand::FetchModelChoices {
                     model,
                     base_url,
@@ -968,6 +1036,35 @@ fn send_host_error(sender: &mpsc::UnboundedSender<HostEvent>, message: &str) {
         message: message.to_string(),
         recoverable: true,
     }));
+}
+
+fn send_skill_list(sender: &mpsc::UnboundedSender<HostEvent>, agent: &Agent) {
+    let (skills, warnings) = agent.list_skills();
+    let active = agent.active_skills();
+    let mut output = if skills.is_empty() {
+        "No valid Skills discovered.".to_string()
+    } else {
+        skills
+            .into_iter()
+            .map(|skill| {
+                let marker = if active.iter().any(|item| item.name == skill.name) {
+                    "*"
+                } else {
+                    " "
+                };
+                format!(
+                    "{marker} {:<24} [{}] {}",
+                    skill.name, skill.source, skill.description
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    if !warnings.is_empty() {
+        output.push_str("\n\nWarnings:\n");
+        output.push_str(&warnings.join("\n"));
+    }
+    let _ = sender.send(HostEvent::Notice(output));
 }
 
 fn send_session_list(

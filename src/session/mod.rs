@@ -8,8 +8,8 @@ mod projection;
 mod recovery;
 
 pub use model::{
-    AssistantRecord, CompactionRecord, CreateSession, ExportFormat, ModelContext, RunId,
-    RuntimeSnapshot, SessionFilter, SessionId, SessionSnapshot, SessionStatus, SessionSummary,
+    ActiveSkillRecord, AssistantRecord, CompactionRecord, CreateSession, ExportFormat, ModelContext,
+    RunId, RuntimeSnapshot, SessionFilter, SessionId, SessionSnapshot, SessionStatus, SessionSummary,
     ToolCallRecord, ToolResultRecord, Transcript, TranscriptItem, TranscriptKind, TurnFailure,
     TurnId,
 };
@@ -168,6 +168,20 @@ impl SessionManager {
                 SessionEvent::TitleChanged { title } => Some(SessionEvent::TitleChanged { title }),
                 SessionEvent::ModelChanged { model, model_id } => {
                     Some(SessionEvent::ModelChanged { model, model_id })
+                }
+                SessionEvent::SkillActivated {
+                    name,
+                    source,
+                    digest,
+                    order,
+                } => Some(SessionEvent::SkillActivated {
+                    name,
+                    source,
+                    digest,
+                    order,
+                }),
+                SessionEvent::SkillDeactivated { name } => {
+                    Some(SessionEvent::SkillDeactivated { name })
                 }
                 SessionEvent::ContextReset { new_epoch } => {
                     Some(SessionEvent::ContextReset { new_epoch })
@@ -447,6 +461,10 @@ impl Session {
         self.projection.context()
     }
 
+    pub fn active_skills(&self) -> Vec<ActiveSkillRecord> {
+        self.projection.active_skills()
+    }
+
     pub fn directory(&self) -> Option<&Path> {
         self.directory.as_deref()
     }
@@ -504,6 +522,37 @@ impl Session {
             return Ok(());
         }
         self.append(SessionEvent::ModelChanged { model, model_id }, None, true)?;
+        Ok(())
+    }
+
+    pub(crate) fn activate_skill(&mut self, skill: ActiveSkillRecord) -> Result<()> {
+        ensure!(!self.projection.has_active_turn(), "cannot activate a Skill during an active turn");
+        if self.projection.active_skills().iter().any(|active| active.name == skill.name) {
+            return Ok(());
+        }
+        self.append(
+            SessionEvent::SkillActivated {
+                name: skill.name,
+                source: skill.source,
+                digest: skill.digest,
+                order: skill.order,
+            },
+            None,
+            true,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn deactivate_skill(&mut self, name: &str) -> Result<()> {
+        ensure!(!self.projection.has_active_turn(), "cannot deactivate a Skill during an active turn");
+        if !self.projection.active_skills().iter().any(|active| active.name == name) {
+            return Ok(());
+        }
+        self.append(
+            SessionEvent::SkillDeactivated { name: name.to_string() },
+            None,
+            true,
+        )?;
         Ok(())
     }
 
@@ -889,6 +938,43 @@ mod tests {
         assert_eq!(messages[2].role, "tool");
         assert_eq!(messages[2].tool_call_id.as_deref(), Some("call-1"));
         assert_eq!(messages[3].content, "README inspected.");
+    }
+
+    #[test]
+    fn skill_activation_is_durable_and_replayed_in_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let manager = SessionManager::at(directory.path());
+        let mut session = create_test_session(&manager, &workspace);
+        let session_id = *session.id();
+
+        session
+            .activate_skill(ActiveSkillRecord {
+                name: "first".to_string(),
+                source: "project".to_string(),
+                digest: "fnv1a-1".to_string(),
+                order: 0,
+            })
+            .unwrap();
+        session
+            .activate_skill(ActiveSkillRecord {
+                name: "second".to_string(),
+                source: "user".to_string(),
+                digest: "fnv1a-2".to_string(),
+                order: 1,
+            })
+            .unwrap();
+        drop(session);
+
+        let reopened = manager.open(session_id).unwrap();
+        assert_eq!(
+            reopened
+                .active_skills()
+                .into_iter()
+                .map(|skill| skill.name)
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
     }
 
     #[test]

@@ -66,6 +66,7 @@ impl SlashCommand {
 const COMMANDS: &[SlashCommand] = &[
     SlashCommand::always("new", None, "Start a new session"),
     SlashCommand::optional("model", "[name]", "Choose or configure a model"),
+    SlashCommand::optional("skill", "[name]", "List, activate, or manage Skills"),
     SlashCommand::always("sessions", None, "List sessions for this workspace"),
     SlashCommand::always("resume", Some("<id>"), "Resume a session by ID prefix"),
     SlashCommand::always("rename", Some("<title>"), "Rename the current session"),

@@ -109,6 +109,10 @@ pub enum TuiAction {
     Reset,
     NewSession,
     ListModels,
+    ListSkills,
+    ActivateSkill(String),
+    DeactivateSkill(String),
+    ShowSkill(String),
     SwitchModel(String),
     SwitchModelTo {
         model: String,
@@ -701,7 +705,7 @@ impl App {
             "/help" => {
                 self.add_message(Message::new(
                     MessageKind::System,
-                    "Commands: /help /new /model [name] (choose or configure) /sessions /resume <id> /rename <title> /retry /compact /clear /reset /status /cancel /quit",
+                    "Commands: /help /new /model [name] /skills /skill <name> /sessions /resume <id> /rename <title> /retry /compact /clear /reset /status /cancel /quit",
                 ));
                 TuiAction::None
             }
@@ -731,6 +735,46 @@ impl App {
             "/model" => {
                 self.status_message =
                     Some("Agent is busy; cancel before switching models.".to_string());
+                TuiAction::None
+            }
+            "/skills" => TuiAction::ListSkills,
+            "/skill" => {
+                self.status_message = Some(
+                    "Usage: /skill <name>, /skill off <name>, or /skill show <name>".to_string(),
+                );
+                TuiAction::None
+            }
+            _ if input.starts_with("/skill ") && self.agent_state == AgentState::Idle => {
+                let argument = input[7..].trim();
+                if let Some(name) = argument.strip_prefix("off ") {
+                    let name = name.trim();
+                    if name.is_empty() {
+                        self.status_message = Some("Usage: /skill off <name>".to_string());
+                        TuiAction::None
+                    } else {
+                        TuiAction::DeactivateSkill(name.to_string())
+                    }
+                } else if let Some(name) = argument.strip_prefix("show ") {
+                    let name = name.trim();
+                    if name.is_empty() {
+                        self.status_message = Some("Usage: /skill show <name>".to_string());
+                        TuiAction::None
+                    } else {
+                        TuiAction::ShowSkill(name.to_string())
+                    }
+                } else if argument.is_empty() {
+                    self.status_message = Some(
+                        "Usage: /skill <name>, /skill off <name>, or /skill show <name>"
+                            .to_string(),
+                    );
+                    TuiAction::None
+                } else {
+                    TuiAction::ActivateSkill(argument.to_string())
+                }
+            }
+            _ if input.starts_with("/skill ") => {
+                self.status_message =
+                    Some("Agent is busy; cancel before changing Skills.".to_string());
                 TuiAction::None
             }
             "/sessions" => TuiAction::ListSessions,

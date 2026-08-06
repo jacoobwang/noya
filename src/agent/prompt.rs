@@ -1,4 +1,5 @@
 use anyhow::Result;
+use crate::skills::SkillInfo;
 use std::path::Path;
 
 const BASE: &str = r#"You are a coding agent operating inside the user's repository.
@@ -14,7 +15,7 @@ Rules:
 - Prefer small, reversible edits and run focused validation after edits.
 "#;
 
-pub fn build(workspace: &Path) -> Result<String> {
+pub fn build(workspace: &Path, skills: &[(&SkillInfo, &str)]) -> Result<String> {
     let mut prompt = format!("{}\nWorkspace: {}\n", BASE, workspace.display());
     for name in ["AGENTS.md", "README.md"] {
         let path = workspace.join(name);
@@ -22,6 +23,12 @@ pub fn build(workspace: &Path) -> Result<String> {
             let content = std::fs::read_to_string(&path)?;
             prompt.push_str(&format!("\n## {}\n{}\n", name, truncate(&content, 8_000)));
         }
+    }
+    for (info, body) in skills {
+        prompt.push_str(&format!(
+            "\n<skill name=\"{}\" source=\"{}\" digest=\"{}\">\n{}\n</skill>\n",
+            info.name, info.source, info.digest, body
+        ));
     }
     Ok(prompt)
 }

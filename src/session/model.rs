@@ -85,6 +85,8 @@ pub struct SessionSummary {
     pub compaction_through_seq: Option<u64>,
     pub parent_session_id: Option<SessionId>,
     pub archived: bool,
+    #[serde(default)]
+    pub active_skills: Vec<ActiveSkillRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +107,16 @@ pub struct RuntimeSnapshot {
     pub tool_timeout_ms: u64,
     pub max_tool_output_bytes: usize,
     pub temperature: Option<f32>,
+    #[serde(default)]
+    pub active_skills: Vec<ActiveSkillRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveSkillRecord {
+    pub name: String,
+    pub source: String,
+    pub digest: String,
+    pub order: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

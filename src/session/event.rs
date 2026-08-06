@@ -48,6 +48,15 @@ impl EventEnvelope {
 pub enum SessionEvent {
     SessionCreated(SessionCreated),
     RuntimeStarted(RuntimeSnapshot),
+    SkillActivated {
+        name: String,
+        source: String,
+        digest: String,
+        order: usize,
+    },
+    SkillDeactivated {
+        name: String,
+    },
     TitleChanged {
         title: String,
     },

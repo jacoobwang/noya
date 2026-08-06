@@ -8,6 +8,7 @@ pub mod agent;
 pub mod llm;
 pub mod model;
 pub mod session;
+pub mod skills;
 pub mod tools;
 pub mod tui;
 
@@ -16,3 +17,4 @@ pub use agent::{
 };
 pub use llm::{ChatMessage, ChatRequest, ChatResponse, ChatStreamResponse, LlmClient, LlmEvent};
 pub use tools::{Tool, ToolRegistry};
+pub use skills::{SkillInfo, SkillRegistry, SkillSource};
