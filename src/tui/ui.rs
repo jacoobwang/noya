@@ -576,7 +576,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         if visible.is_empty() {
             Span::styled(prompt, Style::default().fg(DIM))
         } else {
-            Span::raw(visible)
+            Span::styled(visible, input_text_style())
         }
     } else if visible.is_empty() {
         Span::styled(
@@ -584,7 +584,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(DIM),
         )
     } else {
-        Span::raw(visible)
+        Span::styled(visible, input_text_style())
     };
     frame.render_widget(Paragraph::new(Line::from(vec![prompt, text])), inner);
 
@@ -593,6 +593,10 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         .saturating_add(u16::try_from(prompt_width + cursor_column).unwrap_or(u16::MAX))
         .min(inner.right().saturating_sub(1));
     frame.set_cursor_position((x, inner.y));
+}
+
+fn input_text_style() -> Style {
+    Style::default().fg(FG)
 }
 
 fn visible_input(input: &str, cursor_byte: usize, available: usize) -> (String, usize) {
@@ -763,6 +767,11 @@ mod tests {
         assert_eq!(label_style.fg, Some(ACCENT));
         assert!(label_style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(content_style.fg, Some(MUTED));
+    }
+
+    #[test]
+    fn typed_input_uses_the_theme_foreground() {
+        assert_eq!(input_text_style().fg, Some(FG));
     }
 
     #[test]
