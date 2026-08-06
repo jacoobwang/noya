@@ -1,3 +1,7 @@
+use super::theme::{
+    ACCENT, ACCENT_SOFT, BG, BORDER_TYPE, DIM, ERROR, FG, INFO, MUTED, PANEL, SUCCESS, SURFACE,
+    TOOL_PENDING_BG, USER_BG, WARNING,
+};
 use crate::tui::{
     app::{AgentState, App, AppInfo, AppMode, Message, MessageKind},
     markdown,
@@ -6,7 +10,7 @@ use ratatui::{
     Frame,
     buffer::Buffer,
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
@@ -39,6 +43,10 @@ pub struct StreamView {
 }
 
 pub fn draw(frame: &mut Frame, app: &App, stream_view: Option<StreamView>) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(BG)),
+        frame.area(),
+    );
     let command_menu_open = !app.command_suggestions().is_empty();
     let model_menu_open = app.mode == AppMode::SelectingModel;
     let menu_open = command_menu_open || model_menu_open;
@@ -62,7 +70,8 @@ fn render_model_menu(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     frame.render_widget(
-        Paragraph::new(model_menu_lines(app, usize::from(area.height))),
+        Paragraph::new(model_menu_lines(app, usize::from(area.height)))
+            .style(Style::default().bg(PANEL)),
         area,
     );
 }
@@ -88,16 +97,16 @@ fn model_menu_lines(app: &App, height: usize) -> Vec<Line<'static>> {
     {
         let is_selected = index == selected;
         let selected_style = Style::default()
-            .fg(Color::Cyan)
+            .fg(ACCENT_SOFT)
             .add_modifier(Modifier::BOLD);
-        let normal_style = Style::default().fg(Color::White);
-        lines.push(Line::from(vec![
+        let normal_style = Style::default().fg(FG);
+        let mut line = Line::from(vec![
             Span::styled(
                 if is_selected { "› " } else { "  " },
                 if is_selected {
                     selected_style
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(DIM)
                 },
             ),
             Span::styled(
@@ -111,21 +120,25 @@ fn model_menu_lines(app: &App, height: usize) -> Vec<Line<'static>> {
             Span::styled(
                 format!("{:<26}", choice.model_id),
                 if is_selected {
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(ACCENT_SOFT)
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(DIM)
                 },
             ),
             Span::styled(
                 if choice.current { "✓ current" } else { "" },
-                Style::default().fg(Color::Green),
+                Style::default().fg(SUCCESS),
             ),
-        ]));
+        ]);
+        if is_selected {
+            line.style = super::theme::selected_row();
+        }
+        lines.push(line);
     }
     if lines.len() < height {
         lines.push(Line::from(Span::styled(
             "  All models · unconfigured models will ask for base URL and API key · ↑/↓ select · Enter switch · Esc close",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(DIM),
         )));
     }
     lines
@@ -150,7 +163,7 @@ fn render_command_menu(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let lines = command_menu_lines(app, usize::from(area.height));
-    frame.render_widget(Paragraph::new(lines), area);
+    frame.render_widget(Paragraph::new(lines).style(Style::default().bg(PANEL)), area);
 }
 
 fn command_menu_lines(app: &App, height: usize) -> Vec<Line<'static>> {
@@ -174,37 +187,35 @@ fn command_menu_lines(app: &App, height: usize) -> Vec<Line<'static>> {
     {
         let is_selected = index == selected;
         let marker_style = Style::default()
-            .fg(if is_selected {
-                Color::Cyan
-            } else {
-                Color::DarkGray
-            })
+            .fg(if is_selected { ACCENT_SOFT } else { DIM })
             .add_modifier(if is_selected {
                 Modifier::BOLD
             } else {
                 Modifier::empty()
             });
         let text_style = if is_selected {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(ACCENT_SOFT).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(FG)
         };
         let description_style = if is_selected {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(ACCENT_SOFT)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(DIM)
         };
         let usage = command.argument.map_or_else(
             || command.name.to_string(),
             |argument| format!("{} {argument}", command.name),
         );
-        lines.push(Line::from(vec![
+        let mut line = Line::from(vec![
             Span::styled(if is_selected { "› " } else { "  " }, marker_style),
             Span::styled(format!("{usage:<20}"), text_style),
             Span::styled(command.description, description_style),
-        ]));
+        ]);
+        if is_selected {
+            line.style = super::theme::selected_row();
+        }
+        lines.push(line);
     }
     if lines.len() < height {
         lines.push(Line::from(Span::styled(
@@ -213,7 +224,7 @@ fn command_menu_lines(app: &App, height: usize) -> Vec<Line<'static>> {
                 selected + 1,
                 suggestions.len()
             ),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(DIM),
         )));
     }
     lines
@@ -225,7 +236,7 @@ pub fn welcome_lines(info: &AppInfo, width: usize) -> Vec<Line<'static>> {
     let workspace = display_workspace(&info.workspace);
     let metadata = welcome_metadata(version, model, &info.model_id, workspace);
     let logo_style = Style::default()
-        .fg(Color::Blue)
+        .fg(ACCENT)
         .add_modifier(Modifier::BOLD);
 
     if width < WIDE_WELCOME_MIN_WIDTH {
@@ -266,26 +277,26 @@ fn welcome_metadata(
             Span::styled(
                 "Noya",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(FG)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!(" v{version}"), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!(" v{version}"), Style::default().fg(DIM)),
         ],
         vec![
             Span::styled(
                 model,
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(ACCENT_SOFT)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!(" · {model_id}"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(DIM),
             ),
         ],
         vec![Span::styled(
             workspace,
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(DIM),
         )],
     ]
 }
@@ -295,12 +306,12 @@ fn welcome_prompt() -> Line<'static> {
         Span::styled(
             "Welcome to Noya.",
             Style::default()
-                .fg(Color::Green)
+                .fg(ACCENT_SOFT)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             " Type a request or /help.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(DIM),
         ),
     ])
 }
@@ -468,12 +479,12 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let (mut label, color) = match app.agent_state {
-        AgentState::Idle => ("Ready".to_string(), Color::Green),
-        AgentState::Thinking => ("Thinking".to_string(), Color::Cyan),
-        AgentState::Generating => ("Generating".to_string(), Color::Green),
-        AgentState::RunningTool => ("Running tool".to_string(), Color::Yellow),
-        AgentState::WaitingApproval => ("Approval required".to_string(), Color::Yellow),
-        AgentState::Error => ("Error".to_string(), Color::Red),
+        AgentState::Idle => ("Ready".to_string(), SUCCESS),
+        AgentState::Thinking => ("Thinking".to_string(), INFO),
+        AgentState::Generating => ("Generating".to_string(), ACCENT_SOFT),
+        AgentState::RunningTool => ("Running tool".to_string(), WARNING),
+        AgentState::WaitingApproval => ("Approval required".to_string(), WARNING),
+        AgentState::Error => ("Error".to_string(), ERROR),
     };
     if !matches!(app.agent_state, AgentState::Idle | AgentState::Error) {
         label = format!("{} {label}", spinner());
@@ -486,14 +497,17 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
     let mut spans = vec![Span::styled(
-        label,
+        format!("· {label}"),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     )];
     if let Some(status) = &app.status_message {
         spans.push(Span::styled(
-            format!(" | {status}"),
-            Style::default().fg(Color::DarkGray),
+            format!("  {status}"),
+            Style::default().fg(DIM),
         ));
+    }
+    if !matches!(app.agent_state, AgentState::Idle | AgentState::Error) {
+        spans.push(Span::styled("  Esc cancel", Style::default().fg(DIM)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -517,9 +531,16 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     if area.is_empty() {
         return;
     }
+    let border_style = if app.agent_state == AgentState::Idle {
+        super::theme::muted_border()
+    } else {
+        super::theme::active_border()
+    };
     let block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .borders(Borders::ALL)
+        .border_type(BORDER_TYPE)
+        .border_style(border_style)
+        .style(Style::default().bg(SURFACE));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.is_empty() {
@@ -529,7 +550,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     let prompt = Span::styled(
         INPUT_PROMPT,
         Style::default()
-            .fg(Color::Green)
+            .fg(ACCENT_SOFT)
             .add_modifier(Modifier::BOLD),
     );
     let prompt_width = UnicodeWidthStr::width(INPUT_PROMPT);
@@ -549,18 +570,18 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     let text = if app.mode == AppMode::SelectingModel {
         Span::styled(
             "Select a model with ↑/↓ and Enter.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(DIM),
         )
     } else if let Some(prompt) = app.model_setup_prompt() {
         if visible.is_empty() {
-            Span::styled(prompt, Style::default().fg(Color::DarkGray))
+            Span::styled(prompt, Style::default().fg(DIM))
         } else {
             Span::raw(visible)
         }
     } else if visible.is_empty() {
         Span::styled(
             "Type a request. /help for commands.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(DIM),
         )
     } else {
         Span::raw(visible)
@@ -633,37 +654,29 @@ fn rendered_cursor_position(
 fn message_style(kind: MessageKind) -> (&'static str, Style, Style) {
     match kind {
         MessageKind::User => (
-            "You",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-            Style::default(),
+            "▸ You",
+            Style::default().fg(INFO).add_modifier(Modifier::BOLD),
+            Style::default().fg(FG).bg(USER_BG),
         ),
         MessageKind::Agent => (
-            "Noya",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-            Style::default(),
+            "◆ Noya",
+            Style::default().fg(ACCENT_SOFT).add_modifier(Modifier::BOLD),
+            Style::default().fg(FG),
         ),
         MessageKind::Tool => (
-            "Tool",
-            Style::default()
-                .fg(Color::LightMagenta)
-                .add_modifier(Modifier::BOLD),
-            Style::default().fg(Color::Gray),
+            "└─ Tool",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(MUTED).bg(TOOL_PENDING_BG),
         ),
         MessageKind::System => (
-            "System",
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-            Style::default().fg(Color::Blue),
+            "· System",
+            Style::default().fg(DIM).add_modifier(Modifier::BOLD),
+            Style::default().fg(MUTED),
         ),
         MessageKind::Error => (
-            "Error",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            Style::default().fg(Color::Red),
+            "✕ Error",
+            Style::default().fg(ERROR).add_modifier(Modifier::BOLD),
+            Style::default().fg(ERROR),
         ),
     }
 }
@@ -746,10 +759,10 @@ mod tests {
     fn tool_messages_use_an_accented_label_and_muted_content() {
         let (label, label_style, content_style) = message_style(MessageKind::Tool);
 
-        assert_eq!(label, "Tool");
-        assert_eq!(label_style.fg, Some(Color::LightMagenta));
+        assert_eq!(label, "└─ Tool");
+        assert_eq!(label_style.fg, Some(ACCENT));
         assert!(label_style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(content_style.fg, Some(Color::Gray));
+        assert_eq!(content_style.fg, Some(MUTED));
     }
 
     #[test]

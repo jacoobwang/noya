@@ -4,6 +4,7 @@ mod app;
 mod command;
 mod event;
 mod markdown;
+mod theme;
 mod ui;
 
 pub use app::AppInfo;

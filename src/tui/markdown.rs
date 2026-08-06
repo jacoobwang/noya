@@ -1,6 +1,7 @@
+use super::theme::{ACCENT, ACCENT_SOFT, CODE_BG, CODE_TEXT, DIM, GRID, INFO, MUTED, NEUTRAL};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -105,29 +106,29 @@ impl Renderer {
             Event::Code(code) => {
                 let style = self.current_style().patch(
                     Style::default()
-                        .fg(Color::LightMagenta)
-                        .bg(Color::Rgb(35, 35, 35)),
+                        .fg(NEUTRAL)
+                        .bg(CODE_BG),
                 );
                 self.append(&code, style);
             }
             Event::InlineMath(math) => {
                 let style = self
                     .current_style()
-                    .patch(Style::default().fg(Color::Magenta));
+                    .patch(Style::default().fg(ACCENT));
                 self.append(&format!("${math}$"), style);
             }
             Event::DisplayMath(math) => {
                 self.flush_line();
                 let style = self
                     .current_style()
-                    .patch(Style::default().fg(Color::Magenta));
+                    .patch(Style::default().fg(ACCENT));
                 self.append(&format!("$${math}$$"), style);
                 self.flush_line();
                 self.push_blank();
             }
             Event::Html(html) | Event::InlineHtml(html) => self.append_text(&html),
             Event::FootnoteReference(label) => {
-                let style = self.current_style().patch(Style::default().fg(Color::Cyan));
+                let style = self.current_style().patch(Style::default().fg(INFO));
                 self.append(&format!("[^{label}]"), style);
             }
             Event::SoftBreak => self.append(" ", self.current_style()),
@@ -148,7 +149,7 @@ impl Renderer {
                 let marker = if checked { "[x] " } else { "[ ] " };
                 self.append(
                     marker,
-                    self.current_style().patch(Style::default().fg(Color::Cyan)),
+                    self.current_style().patch(Style::default().fg(MUTED)),
                 );
             }
         }
@@ -170,7 +171,7 @@ impl Renderer {
                 if let CodeBlockKind::Fenced(language) = kind
                     && !language.is_empty()
                 {
-                    let style = self.base_style.patch(Style::default().fg(Color::DarkGray));
+                    let style = self.base_style.patch(Style::default().fg(DIM));
                     self.append(&format!("{language}"), style);
                     self.flush_line();
                 }
@@ -202,14 +203,14 @@ impl Renderer {
             }
             Tag::FootnoteDefinition(label) => {
                 self.flush_line();
-                let style = self.current_style().patch(Style::default().fg(Color::Cyan));
+                let style = self.current_style().patch(Style::default().fg(INFO));
                 self.append(&format!("[^{label}]: "), style);
             }
             Tag::TableRow => {
                 self.flush_line();
                 self.append(
                     "│ ",
-                    self.base_style.patch(Style::default().fg(Color::DarkGray)),
+                    self.base_style.patch(Style::default().fg(GRID)),
                 );
             }
             Tag::DefinitionListTitle => {
@@ -273,7 +274,7 @@ impl Renderer {
             }
             TagEnd::TableCell => self.append(
                 " │ ",
-                self.base_style.patch(Style::default().fg(Color::DarkGray)),
+                self.base_style.patch(Style::default().fg(GRID)),
             ),
             TagEnd::TableRow => self.flush_line(),
             TagEnd::TableHead => {
@@ -301,18 +302,14 @@ impl Renderer {
         if destination.is_empty() {
             return;
         }
-        let style = self.base_style.patch(Style::default().fg(Color::DarkGray));
+        let style = self.base_style.patch(Style::default().fg(DIM));
         self.append(&format!(" ({destination})"), style);
     }
 
     fn append_text(&mut self, text: &str) {
         let style = self.current_style();
         if self.code_block {
-            let style = style.patch(
-                Style::default()
-                    .fg(Color::LightCyan)
-                    .bg(Color::Rgb(28, 28, 28)),
-            );
+            let style = style.patch(Style::default().fg(CODE_TEXT).bg(CODE_BG));
             for (index, part) in text.split('\n').enumerate() {
                 if index > 0 {
                     self.flush_line();
@@ -343,10 +340,10 @@ impl Renderer {
         let mut style = self.base_style;
         if let Some(level) = self.heading {
             let color = match level {
-                HeadingLevel::H1 => Color::LightGreen,
-                HeadingLevel::H2 => Color::LightCyan,
-                HeadingLevel::H3 => Color::LightBlue,
-                _ => Color::Cyan,
+                HeadingLevel::H1 => ACCENT_SOFT,
+                HeadingLevel::H2 => INFO,
+                HeadingLevel::H3 => ACCENT,
+                _ => ACCENT_SOFT,
             };
             style = style.patch(Style::default().fg(color).add_modifier(Modifier::BOLD));
         }
@@ -362,7 +359,7 @@ impl Renderer {
         if !self.links.is_empty() && self.image_depth == 0 {
             style = style.patch(
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(INFO)
                     .add_modifier(Modifier::UNDERLINED),
             );
         }
@@ -457,7 +454,7 @@ impl LineBuilder {
         } else {
             vec![Span::styled(
                 prefix.to_string(),
-                base_style.patch(Style::default().fg(Color::DarkGray)),
+                base_style.patch(Style::default().fg(GRID)),
             )]
         };
         Self {
@@ -499,11 +496,11 @@ fn wrap_line(line: RichLine, width: usize, base_style: Style) -> Vec<Line<'stati
         return vec![Line::from(vec![
             Span::styled(
                 line.first_prefix,
-                base_style.patch(Style::default().fg(Color::DarkGray)),
+                base_style.patch(Style::default().fg(GRID)),
             ),
             Span::styled(
                 "─".repeat(rule_width),
-                base_style.patch(Style::default().fg(Color::DarkGray)),
+                base_style.patch(Style::default().fg(GRID)),
             ),
         ])];
     }
@@ -686,7 +683,7 @@ mod tests {
             span.content == "重点" && span.style.add_modifier.contains(Modifier::BOLD)
         }));
         assert!(lines.iter().flat_map(|line| &line.spans).any(|span| {
-            span.content == "code" && span.style.fg == Some(Color::LightMagenta)
+            span.content == "code" && span.style.fg == Some(NEUTRAL)
         }));
     }
 
