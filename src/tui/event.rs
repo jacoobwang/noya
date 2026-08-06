@@ -117,7 +117,15 @@ pub fn handle_key_event(key: KeyEvent, app: &mut App) -> TuiAction {
             .unwrap_or_else(|| app.submit_input()),
         KeyCode::Up if app.select_previous_command() => TuiAction::None,
         KeyCode::Down if app.select_next_command() => TuiAction::None,
-        KeyCode::Esc if app.dismiss_command_menu() => TuiAction::None,
+        KeyCode::Esc => {
+            if app.dismiss_command_menu() {
+                TuiAction::None
+            } else if app.agent_state != AgentState::Idle {
+                TuiAction::Cancel
+            } else {
+                TuiAction::None
+            }
+        }
         KeyCode::Backspace => {
             if app.cursor_position > 0 {
                 let start = prev_char_boundary(&app.input, app.cursor_position);
@@ -276,6 +284,15 @@ mod tests {
 
         app.agent_state = AgentState::Idle;
         assert_eq!(handle_key_event(key, &mut app), TuiAction::Quit);
+    }
+
+    #[test]
+    fn esc_cancels_an_active_turn() {
+        let mut app = app();
+        app.agent_state = AgentState::Thinking;
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert_eq!(handle_key_event(key, &mut app), TuiAction::Cancel);
     }
 
     #[test]
