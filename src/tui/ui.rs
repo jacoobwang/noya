@@ -22,7 +22,7 @@ use std::{
     time::Duration,
 };
 
-pub const VIEWPORT_HEIGHT: u16 = 9;
+pub const VIEWPORT_HEIGHT: u16 = 10;
 const INPUT_PROMPT: &str = "> ";
 const COMMAND_MENU_HEIGHT: u16 = 6;
 const COMMAND_MENU_MAX_VISIBLE: usize = 5;
@@ -148,7 +148,7 @@ fn tui_areas(area: Rect, command_menu_open: bool) -> [Rect; 4] {
     Layout::vertical([
         Constraint::Min(0),
         Constraint::Length(1),
-        Constraint::Length(2),
+        Constraint::Length(3),
         Constraint::Length(if command_menu_open {
             COMMAND_MENU_HEIGHT
         } else {
@@ -863,9 +863,17 @@ mod tests {
 
         assert!(stream.is_empty());
         assert_eq!(status.height, 1);
-        assert_eq!(input.height, 2);
+        assert_eq!(input.height, 3);
         assert_eq!(menu.y, input.bottom());
         assert_eq!(menu.height, COMMAND_MENU_HEIGHT);
+    }
+
+    #[test]
+    fn input_area_leaves_a_row_for_text_inside_borders() {
+        let [_, _, input, _] = tui_areas(Rect::new(0, 0, 80, VIEWPORT_HEIGHT), false);
+        let inner = Block::default().borders(Borders::ALL).inner(input);
+
+        assert_eq!(inner.height, 1);
     }
 
     #[test]
