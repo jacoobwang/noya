@@ -8,11 +8,12 @@ mod theme;
 mod ui;
 
 pub use app::AppInfo;
-use app::{App, ModelChoice, TuiAction};
+use app::{App, JobAction, ModelChoice, TuiAction};
 
 use crate::{
     Agent, AgentConfig, AgentEvent, ApprovalPrompt, AutonomousConfig, AutonomousReport, LlmClient,
-    TurnControl,
+    TurnControl, daemon,
+    job::JobEvent,
     model::{
         AuthenticationMode, CredentialStore, Model, ModelCatalogStore, ModelOverrides, ModelStatus,
         ProviderProtocol, RuntimeModelConfig,
@@ -295,6 +296,7 @@ async fn run_loop(
     }
     let mut pending_approvals: HashMap<PathBuf, PendingWorkerApproval> = HashMap::new();
     let mut approval_response: Option<(String, oneshot::Sender<crate::ApprovalDecision>)> = None;
+    let (job_tx, mut job_rx) = mpsc::unbounded_channel::<String>();
 
     loop {
         drain_worker_events(
@@ -304,6 +306,9 @@ async fn run_loop(
             &mut pending_approvals,
             &mut approval_response,
         );
+        while let Ok(message) = job_rx.try_recv() {
+            app.add_message(app::Message::new(app::MessageKind::System, message));
+        }
         flush_unrendered_messages(terminal, &app, &mut ui_runtime)?;
         let stream_view = ui_runtime.stream_view(&app);
         terminal.draw(|frame| ui::draw(frame, &app, stream_view))?;
@@ -348,6 +353,14 @@ async fn run_loop(
                         format!("Failed to switch project: {error}"),
                     ));
                     app.agent_state = app::AgentState::Idle;
+                }
+            }
+            TuiAction::Job(job_action) => {
+                if let Err(error) = handle_job_action(job_action, &app, job_tx.clone()).await {
+                    app.add_message(app::Message::new(
+                        app::MessageKind::Error,
+                        format!("Job command failed: {error}"),
+                    ));
                 }
             }
             other => {
@@ -521,9 +534,102 @@ fn apply_action(
                 app.agent_state = app::AgentState::Thinking;
             }
         }
+        TuiAction::Job(_) => unreachable!("Job actions are handled by the TUI loop"),
         TuiAction::Quit => app.should_quit = true,
         TuiAction::ListProjects | TuiAction::SwitchProject(_) => unreachable!("handled by run loop"),
     }
+}
+
+async fn handle_job_action(
+    action: JobAction,
+    app: &App,
+    notifications: mpsc::UnboundedSender<String>,
+) -> Result<()> {
+    match action {
+        JobAction::Submit(prompt) => {
+            let source_session_id = app
+                .session
+                .as_ref()
+                .context("the current TUI has no persistent Session")?
+                .session_id;
+            let summary = daemon::submit(prompt, Some(source_session_id)).await?;
+            let _ = notifications.send(format!(
+                "Background Job {} submitted ({:?}).",
+                summary.job_id, summary.status
+            ));
+        }
+        JobAction::List => {
+            let status = daemon::status().await?;
+            let _ = notifications.send(serde_json::to_string_pretty(&status)?);
+        }
+        JobAction::Status(job_id) => {
+            let job_id = parse_tui_job_id(&job_id)?;
+            let snapshot = daemon::snapshot(job_id, 0).await?;
+            let _ = notifications.send(serde_json::to_string_pretty(&snapshot.summary)?);
+        }
+        JobAction::Attach(job_id) => {
+            let job_id = parse_tui_job_id(&job_id)?;
+            spawn_job_watch(job_id, notifications);
+        }
+        JobAction::Cancel(job_id) => {
+            daemon::cancel(parse_tui_job_id(&job_id)?).await?;
+            let _ = notifications.send(format!("Cancellation requested for Job {job_id}."));
+        }
+        JobAction::Retry(job_id) => {
+            let summary = daemon::retry(parse_tui_job_id(&job_id)?).await?;
+            let _ = notifications.send(format!(
+                "Job {} retried as {} ({:?}).",
+                job_id, summary.job_id, summary.status
+            ));
+        }
+        JobAction::Approve(job_id) => {
+            daemon::approve(parse_tui_job_id(&job_id)?, true).await?;
+            let _ = notifications.send(format!("Approval submitted for Job {job_id}."));
+        }
+        JobAction::Reject(job_id) => {
+            daemon::approve(parse_tui_job_id(&job_id)?, false).await?;
+            let _ = notifications.send(format!("Rejection submitted for Job {job_id}."));
+        }
+    }
+    Ok(())
+}
+
+fn spawn_job_watch(job_id: Uuid, notifications: mpsc::UnboundedSender<String>) {
+    tokio::spawn(async move {
+        let mut cursor = 0;
+        loop {
+            match daemon::snapshot(job_id, cursor).await {
+                Ok(snapshot) => {
+                    for event in &snapshot.events {
+                        let message = match &event.event {
+                            JobEvent::StateChanged { to, .. } => format!("state -> {to:?}"),
+                            JobEvent::Agent(event) => format!("agent event: {event:?}"),
+                            JobEvent::ApprovalRequired(approval) => {
+                                format!("approval required: {}", approval.tool_name)
+                            }
+                            JobEvent::Completed { .. } => "completed".to_string(),
+                            JobEvent::Failed { message } => format!("failed: {message}"),
+                        };
+                        let _ = notifications.send(format!("Job {job_id} · event {} · {message}", event.sequence));
+                    }
+                    cursor = snapshot.summary.last_sequence;
+                    if snapshot.summary.status.is_terminal() {
+                        let _ = notifications.send(format!("Job {job_id} finished as {:?}.", snapshot.summary.status));
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = notifications.send(format!("Job {job_id} watch failed: {error}"));
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
+}
+
+fn parse_tui_job_id(value: &str) -> Result<Uuid> {
+    Uuid::parse_str(value).context("invalid Job ID; use the full UUID")
 }
 
 fn flush_unrendered_messages(

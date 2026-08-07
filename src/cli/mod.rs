@@ -6,7 +6,7 @@ use noya::{
         AuthenticationMode, CredentialStore, Model, ModelOverrides, ModelStatus,
         ProviderProtocol, RuntimeModelConfig,
     },
-    session::{CreateSession, ExportFormat, SessionFilter, SessionManager, SessionSummary},
+    session::{CreateSession, ExportFormat, SessionFilter, SessionId, SessionManager, SessionSummary},
     tools::{ToolApprovalMode, ToolPolicy},
     tui,
 };
@@ -168,10 +168,44 @@ enum DaemonCommand {
         #[arg(long)]
         reconnect: bool,
     },
+    /// Submit a background Job and return immediately.
+    Submit {
+        /// Optional source Session ID; defaults to the daemon's source Session.
+        #[arg(long)]
+        session: Option<String>,
+        prompt: String,
+    },
+    /// List persisted Jobs.
+    Jobs,
+    /// Inspect or control one Job.
+    Job {
+        #[command(subcommand)]
+        command: JobCommand,
+    },
     /// Show daemon/session state as JSON.
     Status,
     /// Ask the resident daemon to stop.
     Stop,
+}
+
+#[derive(Subcommand)]
+enum JobCommand {
+    /// Show Job state, result, and recent events.
+    Status { job_id: String },
+    /// Attach to Job events.
+    Attach {
+        job_id: String,
+        #[arg(long)]
+        reconnect: bool,
+    },
+    /// Request cooperative cancellation.
+    Cancel { job_id: String },
+    /// Approve the pending tool call.
+    Approve { job_id: String },
+    /// Reject the pending tool call.
+    Reject { job_id: String },
+    /// Retry a failed, cancelled, or interrupted Job.
+    Retry { job_id: String },
 }
 
 #[derive(Subcommand)]
@@ -461,6 +495,20 @@ async fn daemon_command(
             reconnect,
         )
         .await,
+        DaemonCommand::Submit { session, prompt } => {
+            let session_id = session
+                .map(|value| value.parse::<SessionId>())
+                .transpose()
+                .context("invalid source Session ID")?;
+            let summary = daemon::submit(prompt, session_id).await?;
+            println!("{}\t{:?}", summary.job_id, summary.status);
+            Ok(())
+        }
+        DaemonCommand::Jobs => {
+            println!("{}", serde_json::to_string_pretty(&daemon::status().await?)?);
+            Ok(())
+        }
+        DaemonCommand::Job { command } => daemon_job_command(command).await,
         DaemonCommand::Status => {
             let snapshot = daemon::status().await?;
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
@@ -472,6 +520,43 @@ async fn daemon_command(
             Ok(())
         }
     }
+}
+
+async fn daemon_job_command(command: JobCommand) -> Result<()> {
+    match command {
+        JobCommand::Status { job_id } => {
+            let job_id = parse_job_id(&job_id)?;
+            println!("{}", serde_json::to_string_pretty(&daemon::snapshot(job_id, 0).await?)?);
+            Ok(())
+        }
+        JobCommand::Attach { job_id, reconnect } => {
+            daemon::attach_job(parse_job_id(&job_id)?, reconnect).await
+        }
+        JobCommand::Cancel { job_id } => {
+            daemon::cancel(parse_job_id(&job_id)?).await?;
+            println!("Job cancellation requested.");
+            Ok(())
+        }
+        JobCommand::Approve { job_id } => {
+            daemon::approve(parse_job_id(&job_id)?, true).await?;
+            println!("Job approval submitted.");
+            Ok(())
+        }
+        JobCommand::Reject { job_id } => {
+            daemon::approve(parse_job_id(&job_id)?, false).await?;
+            println!("Job rejection submitted.");
+            Ok(())
+        }
+        JobCommand::Retry { job_id } => {
+            let summary = daemon::retry(parse_job_id(&job_id)?).await?;
+            println!("{}\t{:?}", summary.job_id, summary.status);
+            Ok(())
+        }
+    }
+}
+
+fn parse_job_id(value: &str) -> Result<Uuid> {
+    Uuid::parse_str(value).context("invalid Job ID; use the full UUID")
 }
 
 async fn daemon_start(cli: &Cli) -> Result<()> {
@@ -530,9 +615,10 @@ async fn daemon_start(cli: &Cli) -> Result<()> {
     for _ in 0..30 {
         if let Ok(snapshot) = daemon::status().await {
             println!(
-                "Noya daemon started (pid {}, session {}).",
+                "Noya daemon started (pid {}, {} jobs, capacity {}).",
                 child.id(),
-                snapshot.summary.session_id
+                snapshot.jobs.len(),
+                snapshot.capacity
             );
             return Ok(());
         }
@@ -548,7 +634,7 @@ async fn daemon_run(cli: &Cli, store: &CredentialStore) -> Result<()> {
     let workspace = resolve_workspace(cli.workspace.as_deref())?;
     let manager = SessionManager::discover()?;
     let latest = manager.latest(&workspace)?;
-    let (session, model) = if let Some(summary) = latest {
+    let (source_session_id, model) = if let Some(summary) = latest {
         let session_model = summary
             .model
             .parse::<Model>()
@@ -570,7 +656,7 @@ async fn daemon_run(cli: &Cli, store: &CredentialStore) -> Result<()> {
             },
             store,
         )?;
-        (manager.open(summary.session_id)?, model)
+        (summary.session_id, model)
     } else {
         let model = RuntimeModelConfig::resolve(
             ModelOverrides {
@@ -587,10 +673,21 @@ async fn daemon_run(cli: &Cli, store: &CredentialStore) -> Result<()> {
             model: model.model.to_string(),
             model_id: model.model_id.clone(),
         })?;
-        (session, model)
+        let session_id = *session.id();
+        drop(session);
+        (session_id, model)
     };
-    let agent = agent_for_session(cli, model, session, workspace)?;
-    daemon::serve(agent).await
+    let job_manager = noya::job::JobManager::new(
+        noya::job::JobManagerConfig {
+            data_root: manager.root().to_path_buf(),
+            default_source_session_id: source_session_id,
+            model,
+            agent_config: agent_config_for_cli(cli, workspace),
+            max_workers: cli.max_workers,
+        },
+        manager,
+    )?;
+    daemon::serve(job_manager).await
 }
 
 async fn run_new_agent(cli: Cli, store: &CredentialStore) -> Result<()> {
@@ -697,18 +794,7 @@ fn agent_for_session(
     workspace: PathBuf,
 ) -> Result<Agent> {
     Agent::with_session_for_model(
-        AgentConfig {
-            workspace: workspace.clone(),
-            max_tool_loops: cli.max_tool_loops,
-            tool_timeout: std::time::Duration::from_secs(cli.tool_timeout_seconds),
-            max_tool_output_bytes: cli.max_tool_output_bytes,
-            temperature: 0.2,
-            tool_policy: ToolPolicy {
-                approval_mode: cli.tool_approval,
-                ..ToolPolicy::default()
-            }
-            .with_blocked_tools(cli.blocked_tools.clone()),
-        },
+        agent_config_for_cli(cli, workspace),
         LlmClient::with_settings(
             reqwest::Client::new(),
             model.base_url,
@@ -721,6 +807,21 @@ fn agent_for_session(
         session,
         model.model.to_string(),
     )
+}
+
+fn agent_config_for_cli(cli: &Cli, workspace: PathBuf) -> AgentConfig {
+    AgentConfig {
+        workspace,
+        max_tool_loops: cli.max_tool_loops,
+        tool_timeout: std::time::Duration::from_secs(cli.tool_timeout_seconds),
+        max_tool_output_bytes: cli.max_tool_output_bytes,
+        temperature: 0.2,
+        tool_policy: ToolPolicy {
+            approval_mode: cli.tool_approval,
+            ..ToolPolicy::default()
+        }
+        .with_blocked_tools(cli.blocked_tools.clone()),
+    }
 }
 
 fn autonomous_config(cli: &Cli) -> AutonomousConfig {
@@ -1063,6 +1164,30 @@ mod tests {
                     reconnect: true,
                 }
             }) if client_id == "laptop"
+        ));
+
+        let submit = Cli::try_parse_from([
+            "noya",
+            "daemon",
+            "submit",
+            "implement the background task",
+        ])
+        .unwrap();
+        assert!(matches!(
+            submit.command,
+            Some(Command::Daemon {
+                command: DaemonCommand::Submit { ref prompt, session: None }
+            }) if prompt == "implement the background task"
+        ));
+
+        let job = Cli::try_parse_from(["noya", "daemon", "job", "cancel", "1234"]).unwrap();
+        assert!(matches!(
+            job.command,
+            Some(Command::Daemon {
+                command: DaemonCommand::Job {
+                    command: JobCommand::Cancel { ref job_id }
+                }
+            }) if job_id == "1234"
         ));
     }
 

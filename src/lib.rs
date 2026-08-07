@@ -8,6 +8,7 @@ pub mod agent;
 pub mod daemon;
 pub mod llm;
 pub mod model;
+pub mod job;
 pub mod session;
 pub mod skills;
 pub mod tools;

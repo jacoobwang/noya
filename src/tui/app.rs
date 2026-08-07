@@ -158,7 +158,20 @@ pub enum TuiAction {
     Compact,
     Cancel,
     Approval(ApprovalDecision),
+    Job(JobAction),
     Quit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobAction {
+    Submit(String),
+    List,
+    Status(String),
+    Attach(String),
+    Cancel(String),
+    Retry(String),
+    Approve(String),
+    Reject(String),
 }
 
 pub struct App {
@@ -731,7 +744,7 @@ impl App {
             "/help" => {
                 self.add_message(Message::new(
                     MessageKind::System,
-                    "Commands: /help /new /model [name] /skills /skill <name> /sessions /goal [status|pause|resume|complete|clear] /autonomous <prompt> /tree /branch <name> /branch select <id> [summary] /project [index|path] /resume <id> /rename <title> /retry /compact /clear /reset /status /cancel /quit",
+                    "Commands: /help /new /model [name] /skills /skill <name> /sessions /goal [status|pause|resume|complete|clear] /autonomous <prompt> /tree /branch <name> /branch select <id> [summary] /project [index|path] /resume <id> /rename <title> /retry /compact /job <submit|list|status|attach|cancel|retry|approve|reject> /clear /reset /status /cancel /quit",
                 ));
                 TuiAction::None
             }
@@ -804,6 +817,11 @@ impl App {
                 TuiAction::None
             }
             "/sessions" => TuiAction::ListSessions,
+            "/job" => {
+                self.status_message = Some("Usage: /job submit <prompt>, /job list, /job status <id>, /job attach <id>, /job cancel <id>, /job retry <id>, /job approve <id>, or /job reject <id>".to_string());
+                TuiAction::None
+            }
+            _ if input.starts_with("/job ") => Self::parse_job_action(&input[5..], self),
             "/goal" | "/goal status" => TuiAction::ShowGoal,
             "/goal pause" if self.agent_state == AgentState::Idle => TuiAction::UpdateGoalStatus {
                 status: GoalStatus::Paused,
@@ -1011,6 +1029,30 @@ impl App {
                 self.add_message(Message::new(MessageKind::User, input.clone()));
                 self.agent_state = AgentState::Thinking;
                 TuiAction::Submit(input)
+            }
+        }
+    }
+
+    fn parse_job_action(argument: &str, app: &mut App) -> TuiAction {
+        let mut parts = argument.trim().splitn(2, char::is_whitespace);
+        let command = parts.next().unwrap_or_default();
+        let value = parts.next().unwrap_or_default().trim();
+        let action = match command {
+            "submit" if !value.is_empty() => Some(JobAction::Submit(value.to_string())),
+            "list" if value.is_empty() => Some(JobAction::List),
+            "status" if !value.is_empty() => Some(JobAction::Status(value.to_string())),
+            "attach" if !value.is_empty() => Some(JobAction::Attach(value.to_string())),
+            "cancel" if !value.is_empty() => Some(JobAction::Cancel(value.to_string())),
+            "retry" if !value.is_empty() => Some(JobAction::Retry(value.to_string())),
+            "approve" if !value.is_empty() => Some(JobAction::Approve(value.to_string())),
+            "reject" if !value.is_empty() => Some(JobAction::Reject(value.to_string())),
+            _ => None,
+        };
+        match action {
+            Some(action) => TuiAction::Job(action),
+            None => {
+                app.status_message = Some("Usage: /job submit <prompt>, /job list, /job status <id>, /job attach <id>, /job cancel <id>, /job retry <id>, /job approve <id>, or /job reject <id>".to_string());
+                TuiAction::None
             }
         }
     }
@@ -1466,5 +1508,26 @@ mod tests {
             TuiAction::None
         );
         assert!(app.status_message.as_deref().unwrap().contains("busy"));
+    }
+
+    #[test]
+    fn job_commands_map_to_background_actions() {
+        let mut app = app();
+        assert_eq!(
+            app.handle_submission("/job submit run the migration".to_string()),
+            TuiAction::Job(JobAction::Submit("run the migration".to_string()))
+        );
+        assert_eq!(
+            app.handle_submission("/job list".to_string()),
+            TuiAction::Job(JobAction::List)
+        );
+        assert_eq!(
+            app.handle_submission("/job approve 1234".to_string()),
+            TuiAction::Job(JobAction::Approve("1234".to_string()))
+        );
+        assert!(matches!(
+            app.handle_submission("/job unknown".to_string()),
+            TuiAction::None
+        ));
     }
 }

@@ -31,6 +31,7 @@ src/
   session/  append-only JSONL, replay projections, recovery, and compaction
   tools/    tool registry, filesystem/patch/Git tools, and command execution
   tui/      terminal host, state, input events, and rendering
+  job/      durable Job records, bounded Workers, approval, cancellation, and retry
   daemon/   resident Agent process, Unix socket protocol, and event replay
 ```
 
@@ -214,9 +215,19 @@ noya --workspace /path/to/repo daemon attach --client-id laptop --reconnect
 #   /detach   leave the daemon running
 #   /quit     leave the daemon running
 noya daemon stop
+
+# Submit and inspect a background Job without staying attached
+noya daemon submit "Implement and verify the migration"
+noya daemon jobs
+noya daemon job status <job-uuid>
+noya daemon job attach <job-uuid> --reconnect
+noya daemon job cancel <job-uuid>
+noya daemon job retry <job-uuid>
 ```
 
 The daemon owns the session lock and Agent process. It listens on a Unix socket under `NOYA_DATA_DIR` (or `~/.noya/daemon.sock`), keeps a bounded in-memory event replay buffer, and returns a durable session snapshot when a reconnect crosses a daemon generation or falls outside the replay window. The client sends a stable `--client-id` and its last `{generation, sequence}` cursor, so reconnect does not require starting a new session.
+
+The JobManager stores each background Job separately under `NOYA_DATA_DIR/jobs/<job-uuid>/`. A Job gets an independent Session forked from the submitting Session, so its transcript does not mix with the active TUI Session. Use `/job submit`, `/job list`, `/job status <id>`, `/job attach <id>`, `/job cancel <id>`, `/job retry <id>`, `/job approve <id>`, and `/job reject <id>` from the TUI; the TUI must be connected to a running daemon.
 
 Session data is stored below `NOYA_DATA_DIR` when set, otherwise in `~/.noya/`. Each session has an append-only `events.jsonl`, derived `meta.json`, a transient streaming checkpoint, and an advisory lock. Session logs may contain source code, prompts, model reasoning, tool arguments, and command output; protect them as sensitive local data. API keys are never written to session files.
 

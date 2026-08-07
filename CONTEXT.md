@@ -43,8 +43,64 @@ A canonicalized, existing local directory that Noya uses as a coding workspace. 
 _Avoid_: Repository, session
 
 **Worker**:
-The runtime agent bound to exactly one Project. A Worker owns that Project's model, active Skills, session execution, tool calls, and approval state.
+The long-lived runtime agent bound to exactly one Project. A Worker owns that Project's model, active Skills, session execution, tool calls, and approval state, and executes Jobs sequentially for its bound Session context.
 _Avoid_: Thread, session, workspace process
+
+**Job**:
+A user-submitted unit of work executed by a Worker. A Job has its own lifecycle, request identity, outcome, and event cursor, while using a Session as its durable conversation context.
+_Avoid_: Worker, turn, session
+
+**Job Manager**:
+The orchestration boundary that accepts Jobs, assigns them to Workers, tracks their lifecycle, and exposes status, cancellation, result, and reconnect behavior.
+_Avoid_: Worker registry, session manager
+
+**Job Lifecycle**:
+The states a Job can occupy: queued before assignment, running while the Worker executes it, waiting approval when a tool requires user authorization, and completed, failed, cancelled, or interrupted as terminal outcomes.
+_Avoid_: Session status, Agent turn status
+
+**Interrupted Job**:
+A Job whose Worker stopped before a terminal outcome because the daemon exited, crashed, or lost its runtime. An Interrupted Job is not automatically replayed; retry is an explicit new execution decision.
+_Avoid_: Failed Job, cancelled Job
+
+**Job Record**:
+The durable identity and lifecycle history of a Job, including its request, Session reference, Project, state transitions, outcome, and reconnect cursor. A Job Record is separate from the Session's conversation history.
+_Avoid_: Session record, transcript
+
+**Job Scheduling**:
+The bounded assignment of queued Jobs to Workers. A Worker executes at most one Job for its Session at a time; Jobs for different Projects or Sessions may run concurrently up to the configured Worker capacity.
+_Avoid_: Parallel turns, unbounded background execution
+
+**Job Approval**:
+The explicit authorization of a tool call requested by a Job. A Job that needs authorization remains waiting approval until a client approves or rejects it; client disconnection does not authorize the call.
+_Avoid_: Automatic approval, interactive turn approval
+
+**Cancelling Job**:
+A running Job for which cancellation has been requested but the Worker has not yet returned. Cancellation is cooperative; the Job becomes cancelled only after the Worker acknowledges the stop.
+_Avoid_: Interrupted Job, force-killed Job
+
+**Job Retry**:
+An explicit new Job created from a failed, interrupted, or cancelled Job. It receives a new identity, keeps a reference to the original Job, and reuses the original Project and Session context.
+_Avoid_: In-place restart, automatic replay
+
+**Job Session**:
+The durable Session context assigned to a Job. A Job Session is independently writable by its Worker so a background Job does not concurrently write the Session currently owned by an interactive client.
+_Avoid_: Active TUI session, shared transcript
+
+**Job Recovery**:
+The explicit restart policy for durable Job Records: queued Jobs remain eligible for scheduling, while running, waiting approval, or cancelling Jobs become interrupted and require an explicit retry.
+_Avoid_: Automatic turn replay, transparent continuation
+
+**Job Event Stream**:
+The ordered lifecycle and Agent-event history of a Job. Its durable sequence is the source of truth for reconnect; the daemon's in-memory broadcast and bounded replay are only a live-delivery optimization.
+_Avoid_: Session transcript, socket buffer
+
+**Worker Reuse**:
+The lifecycle policy for the runtime that executes Jobs: a Worker may be reused for later queued Jobs targeting the same Project and Job Session, while the Job Record remains the unit of execution history.
+_Avoid_: Job identity reuse, shared concurrent session writer
+
+**Job Observation**:
+The client view of a Job's state and events without changing the active interactive Session. Observing a Job does not merge its transcript into the active Session.
+_Avoid_: Session switch, transcript merge
 
 **Active Worker**:
 The Worker currently connected to the TUI input and transcript view. Other Workers may continue turns in the background but do not inject their output into the active view.
