@@ -339,6 +339,10 @@ impl SessionManager {
         })
     }
 
+    pub fn log_path(&self, id: SessionId) -> Result<PathBuf> {
+        Ok(self.find_session_dir(id)?.join("events.jsonl"))
+    }
+
     fn ensure_root(&self) -> Result<()> {
         create_private_dir(&self.root)?;
         create_private_dir(&self.sessions_dir())?;

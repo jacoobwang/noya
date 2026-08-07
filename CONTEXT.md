@@ -36,6 +36,28 @@ _Avoid_: OpenAI-compatible protocol, Claude model
 The deterministic automatic choice used when a configured Model ID is no longer present in the latest Model Catalog: prefer the Provider default, then the first catalog entry.
 _Avoid_: Silent model migration, random model selection
 
+## Project Workers
+
+**Project**:
+A canonicalized, existing local directory that Noya uses as a coding workspace. Projects are identified by their directory path, not by a user-defined name.
+_Avoid_: Repository, session
+
+**Worker**:
+The runtime agent bound to exactly one Project. A Worker owns that Project's model, active Skills, session execution, tool calls, and approval state.
+_Avoid_: Thread, session, workspace process
+
+**Active Worker**:
+The Worker currently connected to the TUI input and transcript view. Other Workers may continue turns in the background but do not inject their output into the active view.
+_Avoid_: Current session
+
+**Project Switch**:
+Changing the Active Worker to another Project, loading that Project's latest non-archived Session, or creating a new Session when none exists.
+_Avoid_: Workspace rebind, session migration
+
+**Project History**:
+The list of distinct Projects derived from Session metadata and ordered by each Project's latest Session update. The TUI exposes at most ten entries.
+_Avoid_: Project database, worker registry
+
 ## Code Navigation
 
 **Language Server**:

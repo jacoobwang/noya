@@ -65,11 +65,14 @@
 /clear      清空当前会话的显示记录；终端原生 scrollback 保留
 /reset      重建 Agent 会话上下文
 /status     显示 workspace、model 和当前状态
+/project    列出最近使用的 Project；`/project <index|path>` 切换 Worker
 /cancel     取消当前 turn
 /quit       退出
 ```
 
 空输入不提交。Agent 执行期间不允许提交第二个普通任务，避免同一个 Agent 实例的消息上下文发生并发修改。
+
+每个 Worker 绑定一个规范化 workspace。非 active Worker 可以继续执行任务，但它们的输出不会混入当前 TUI transcript；`/project` 列表显示 Worker 状态，并通过通知提示完成、错误和待审批事件。默认最多同时运行 4 个 Worker，可用 `--max-workers` 或 `NOYA_MAX_WORKERS` 调整。
 
 ## 4. 模块结构
 

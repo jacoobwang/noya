@@ -134,6 +134,8 @@ pub enum TuiAction {
         authentication: AuthenticationMode,
     },
     ListSessions,
+    ListProjects,
+    SwitchProject(String),
     ResumeSession(String),
     RenameSession(String),
     Retry,
@@ -156,6 +158,7 @@ pub struct App {
     pub mode: AppMode,
     pub pending_approval: Option<ApprovalRequest>,
     pub status_message: Option<String>,
+    pub background_notifications: usize,
     pub should_quit: bool,
     pub session: Option<SessionSummary>,
     pub session_log_path: Option<PathBuf>,
@@ -181,6 +184,7 @@ impl App {
             mode: AppMode::Normal,
             pending_approval: None,
             status_message: None,
+            background_notifications: 0,
             should_quit: false,
             session: None,
             session_log_path: None,
@@ -199,6 +203,7 @@ impl App {
         log_path: Option<PathBuf>,
         context_tokens: usize,
     ) {
+        self.info.workspace = summary.workspace.clone();
         self.info.model = summary.model.clone();
         self.info.model_id = summary.model_id.clone();
         self.messages.clear();
@@ -705,7 +710,7 @@ impl App {
             "/help" => {
                 self.add_message(Message::new(
                     MessageKind::System,
-                    "Commands: /help /new /model [name] /skills /skill <name> /sessions /resume <id> /rename <title> /retry /compact /clear /reset /status /cancel /quit",
+                    "Commands: /help /new /model [name] /skills /skill <name> /sessions /project [index|path] /resume <id> /rename <title> /retry /compact /clear /reset /status /cancel /quit",
                 ));
                 TuiAction::None
             }
@@ -778,6 +783,26 @@ impl App {
                 TuiAction::None
             }
             "/sessions" => TuiAction::ListSessions,
+            "/project" if self.agent_state == AgentState::Idle => TuiAction::ListProjects,
+            "/project" => {
+                self.status_message =
+                    Some("Agent is busy; wait or use /cancel before switching projects.".to_string());
+                TuiAction::None
+            }
+            _ if input.starts_with("/project ") && self.agent_state == AgentState::Idle => {
+                let target = input[9..].trim();
+                if target.is_empty() {
+                    TuiAction::ListProjects
+                } else {
+                    self.agent_state = AgentState::Thinking;
+                    TuiAction::SwitchProject(target.to_string())
+                }
+            }
+            _ if input.starts_with("/project ") => {
+                self.status_message =
+                    Some("Agent is busy; wait or use /cancel before switching projects.".to_string());
+                TuiAction::None
+            }
             "/retry" if self.agent_state == AgentState::Idle => {
                 self.agent_state = AgentState::Thinking;
                 TuiAction::Retry
@@ -895,6 +920,14 @@ impl App {
         while self.messages.len() > MAX_MESSAGE_HISTORY {
             self.messages.pop_front();
         }
+    }
+
+    pub fn notify_background_worker(&mut self) {
+        self.background_notifications = self.background_notifications.saturating_add(1);
+    }
+
+    pub fn clear_background_notifications(&mut self) {
+        self.background_notifications = 0;
     }
 
     pub fn active_turn_elapsed(&self) -> Option<Duration> {
@@ -1259,5 +1292,27 @@ mod tests {
             app.handle_submission("/clear".to_string()),
             TuiAction::Clear
         );
+    }
+
+    #[test]
+    fn project_commands_list_and_switch_when_idle() {
+        let mut app = app();
+
+        assert_eq!(
+            app.handle_submission("/project".to_string()),
+            TuiAction::ListProjects
+        );
+        assert_eq!(
+            app.handle_submission("/project 2".to_string()),
+            TuiAction::SwitchProject("2".to_string())
+        );
+        assert_eq!(app.agent_state, AgentState::Thinking);
+
+        app.agent_state = AgentState::Generating;
+        assert_eq!(
+            app.handle_submission("/project /tmp".to_string()),
+            TuiAction::None
+        );
+        assert!(app.status_message.as_deref().unwrap().contains("busy"));
     }
 }

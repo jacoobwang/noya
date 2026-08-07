@@ -52,6 +52,10 @@ pub struct Cli {
     /// Maximum serialized tool result retained in the model context.
     #[arg(long, default_value_t = 32_768)]
     max_tool_output_bytes: usize,
+
+    /// Maximum number of project Workers kept alive in this process.
+    #[arg(long, env = "NOYA_MAX_WORKERS", default_value_t = 4)]
+    max_workers: usize,
 }
 
 #[derive(Subcommand)]
@@ -462,6 +466,7 @@ async fn run_tui(
             model: model.model.to_string(),
             model_id: model.model_id,
         },
+        cli.max_workers,
     )
     .await
 }

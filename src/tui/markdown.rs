@@ -48,10 +48,11 @@ struct ItemState {
     first_line_written: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum RichLineKind {
     Normal,
     Rule,
+    Table(TableSpec),
 }
 
 #[derive(Debug)]
@@ -61,6 +62,20 @@ struct RichLine {
     continuation_prefix: String,
     preserve_whitespace: bool,
     kind: RichLineKind,
+}
+
+#[derive(Debug, Default)]
+struct TableState {
+    rows: Vec<Vec<Vec<Span<'static>>>>,
+    current_row: Vec<Vec<Span<'static>>>,
+    current_cell: Option<Vec<Span<'static>>>,
+    header_rows: usize,
+}
+
+#[derive(Debug)]
+struct TableSpec {
+    rows: Vec<Vec<Vec<Span<'static>>>>,
+    header_rows: usize,
 }
 
 struct Renderer {
@@ -77,6 +92,7 @@ struct Renderer {
     strike_depth: usize,
     code_block: bool,
     image_depth: usize,
+    table: Option<TableState>,
 }
 
 impl Renderer {
@@ -95,6 +111,7 @@ impl Renderer {
             strike_depth: 0,
             code_block: false,
             image_depth: 0,
+            table: None,
         }
     }
 
@@ -132,7 +149,13 @@ impl Renderer {
                 self.append(&format!("[^{label}]"), style);
             }
             Event::SoftBreak => self.append(" ", self.current_style()),
-            Event::HardBreak => self.flush_line(),
+            Event::HardBreak => {
+                if self.table.as_ref().and_then(|table| table.current_cell.as_ref()).is_some() {
+                    self.append(" ", self.current_style());
+                } else {
+                    self.flush_line();
+                }
+            }
             Event::Rule => {
                 self.flush_line();
                 let (first_prefix, continuation_prefix) = self.prefixes();
@@ -176,6 +199,25 @@ impl Renderer {
                     self.flush_line();
                 }
             }
+            Tag::Table(_) => {
+                self.flush_line();
+                self.table = Some(TableState::default());
+            }
+            Tag::TableRow => {
+                if let Some(table) = self.table.as_mut() {
+                    table.current_row.clear();
+                }
+            }
+            Tag::TableCell => {
+                if let Some(table) = self.table.as_mut() {
+                    table.current_cell = Some(Vec::new());
+                }
+            }
+            Tag::TableHead => {
+                if let Some(table) = self.table.as_mut() {
+                    table.current_row.clear();
+                }
+            }
             Tag::List(start) => {
                 self.flush_line();
                 self.lists.push(ListState { next_number: start });
@@ -205,13 +247,6 @@ impl Renderer {
                 self.flush_line();
                 let style = self.current_style().patch(Style::default().fg(INFO));
                 self.append(&format!("[^{label}]: "), style);
-            }
-            Tag::TableRow => {
-                self.flush_line();
-                self.append(
-                    "│ ",
-                    self.base_style.patch(Style::default().fg(GRID)),
-                );
             }
             Tag::DefinitionListTitle => {
                 self.flush_line();
@@ -272,22 +307,42 @@ impl Renderer {
                 self.flush_line();
                 self.push_blank();
             }
-            TagEnd::TableCell => self.append(
-                " │ ",
-                self.base_style.patch(Style::default().fg(GRID)),
-            ),
-            TagEnd::TableRow => self.flush_line(),
-            TagEnd::TableHead => {
-                let (first_prefix, continuation_prefix) = self.prefixes();
-                self.lines.push(RichLine {
-                    spans: Vec::new(),
-                    first_prefix,
-                    continuation_prefix,
-                    preserve_whitespace: false,
-                    kind: RichLineKind::Rule,
-                });
+            TagEnd::TableCell => {
+                if let Some(table) = self.table.as_mut()
+                    && let Some(cell) = table.current_cell.take()
+                {
+                    table.current_row.push(cell);
+                }
             }
-            TagEnd::Table => self.push_blank(),
+            TagEnd::TableRow => {
+                if let Some(table) = self.table.as_mut() {
+                    table.rows.push(std::mem::take(&mut table.current_row));
+                }
+            }
+            TagEnd::TableHead => {
+                if let Some(table) = self.table.as_mut() {
+                    if !table.current_row.is_empty() {
+                        table.rows.push(std::mem::take(&mut table.current_row));
+                    }
+                    table.header_rows = table.rows.len();
+                }
+            }
+            TagEnd::Table => {
+                if let Some(table) = self.table.take() {
+                    let (first_prefix, continuation_prefix) = self.prefixes();
+                    self.lines.push(RichLine {
+                        spans: Vec::new(),
+                        first_prefix,
+                        continuation_prefix,
+                        preserve_whitespace: false,
+                        kind: RichLineKind::Table(TableSpec {
+                            rows: table.rows,
+                            header_rows: table.header_rows,
+                        }),
+                    });
+                }
+                self.push_blank();
+            }
             TagEnd::DefinitionListTitle => {
                 self.strong_depth = self.strong_depth.saturating_sub(1);
                 self.flush_line();
@@ -325,6 +380,10 @@ impl Renderer {
 
     fn append(&mut self, text: &str, style: Style) {
         if text.is_empty() {
+            return;
+        }
+        if let Some(cell) = self.table.as_mut().and_then(|table| table.current_cell.as_mut()) {
+            append_span(cell, text, style);
             return;
         }
         if let Some(last) = self.current.last_mut()
@@ -407,7 +466,7 @@ impl Renderer {
         if self
             .lines
             .last()
-            .is_some_and(|line| line.spans.is_empty() && line.kind == RichLineKind::Normal)
+            .is_some_and(|line| line.spans.is_empty() && matches!(line.kind, RichLineKind::Normal))
         {
             return;
         }
@@ -425,20 +484,215 @@ impl Renderer {
         while self
             .lines
             .last()
-            .is_some_and(|line| line.spans.is_empty() && line.kind == RichLineKind::Normal)
+            .is_some_and(|line| line.spans.is_empty() && matches!(line.kind, RichLineKind::Normal))
         {
             self.lines.pop();
         }
 
         let mut output = Vec::new();
         for line in self.lines {
-            output.extend(wrap_line(line, width, self.base_style));
+            if let RichLineKind::Table(table) = line.kind {
+                output.extend(render_table(
+                    table,
+                    &line.first_prefix,
+                    &line.continuation_prefix,
+                    width,
+                    self.base_style,
+                ));
+            } else {
+                output.extend(wrap_line(line, width, self.base_style));
+            }
         }
         if output.is_empty() {
             output.push(Line::default());
         }
         output
     }
+}
+
+fn append_span(spans: &mut Vec<Span<'static>>, text: &str, style: Style) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last) = spans.last_mut()
+        && last.style == style
+    {
+        last.content.to_mut().push_str(text);
+    } else {
+        spans.push(Span::styled(text.to_string(), style));
+    }
+}
+
+fn spans_width(spans: &[Span<'static>]) -> usize {
+    spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
+}
+
+fn fit_spans(spans: &[Span<'static>], width: usize, base_style: Style) -> Vec<Span<'static>> {
+    if spans_width(spans) <= width {
+        return spans.to_vec();
+    }
+    if width == 0 {
+        return Vec::new();
+    }
+    let content_width = width.saturating_sub(1);
+    let mut output = Vec::new();
+    let mut used: usize = 0;
+    'spans: for span in spans {
+        for character in span.content.chars() {
+            let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+            if used.saturating_add(character_width) > content_width {
+                break 'spans;
+            }
+            append_span(&mut output, &character.to_string(), span.style);
+            used = used.saturating_add(character_width);
+        }
+    }
+    append_span(
+        &mut output,
+        "…",
+        spans.last().map_or(base_style, |span| span.style),
+    );
+    output
+}
+
+fn shrink_column_widths(mut widths: Vec<usize>, budget: usize) -> Vec<usize> {
+    while widths.iter().sum::<usize>() > budget {
+        let Some((index, _)) = widths
+            .iter()
+            .enumerate()
+            .filter(|(_, width)| **width > 1)
+            .max_by_key(|(_, width)| **width)
+        else {
+            break;
+        };
+        widths[index] = widths[index].saturating_sub(1);
+    }
+    widths
+}
+
+fn render_table(
+    table: TableSpec,
+    first_prefix: &str,
+    continuation_prefix: &str,
+    width: usize,
+    base_style: Style,
+) -> Vec<Line<'static>> {
+    let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0);
+    if columns == 0 {
+        return Vec::new();
+    }
+
+    let available = width
+        .saturating_sub(UnicodeWidthStr::width(first_prefix))
+        .max(1);
+    let padding_and_borders = columns.saturating_mul(3).saturating_add(1);
+    let content_budget = available
+        .saturating_sub(padding_and_borders)
+        .max(columns);
+    let desired_widths = (0..columns)
+        .map(|column| {
+            table
+                .rows
+                .iter()
+                .filter_map(|row| row.get(column))
+                .map(|cell| spans_width(cell))
+                .max()
+                .unwrap_or(1)
+                .max(1)
+        })
+        .collect::<Vec<_>>();
+    let widths = shrink_column_widths(desired_widths, content_budget);
+    let grid_style = base_style.patch(Style::default().fg(GRID));
+    let mut output = Vec::new();
+
+    output.push(table_border(
+        first_prefix,
+        '┌',
+        '┬',
+        '┐',
+        &widths,
+        grid_style,
+    ));
+    for (row_index, row) in table.rows.iter().enumerate() {
+        let prefix = if row_index == 0 {
+            first_prefix
+        } else {
+            continuation_prefix
+        };
+        output.push(table_content_line(row, prefix, &widths, base_style));
+        if row_index + 1 == table.header_rows {
+            output.push(table_border(
+                continuation_prefix,
+                '├',
+                '┼',
+                '┤',
+                &widths,
+                grid_style,
+            ));
+        }
+    }
+    output.push(table_border(
+        continuation_prefix,
+        '└',
+        '┴',
+        '┘',
+        &widths,
+        grid_style,
+    ));
+    output
+}
+
+fn table_border(
+    prefix: &str,
+    left: char,
+    junction: char,
+    right: char,
+    widths: &[usize],
+    style: Style,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    append_span(&mut spans, prefix, style);
+    append_span(&mut spans, &left.to_string(), style);
+    for (index, width) in widths.iter().enumerate() {
+        append_span(&mut spans, &"─".repeat(width.saturating_add(2)), style);
+        let edge = if index + 1 == widths.len() {
+            right
+        } else {
+            junction
+        };
+        let edge = edge.to_string();
+        append_span(&mut spans, &edge, style);
+    }
+    Line::from(spans)
+}
+
+fn table_content_line(
+    row: &[Vec<Span<'static>>],
+    prefix: &str,
+    widths: &[usize],
+    base_style: Style,
+) -> Line<'static> {
+    let grid_style = base_style.patch(Style::default().fg(GRID));
+    let mut spans = Vec::new();
+    append_span(&mut spans, prefix, grid_style);
+    append_span(&mut spans, "│", grid_style);
+    for (index, width) in widths.iter().enumerate() {
+        append_span(&mut spans, " ", grid_style);
+        let cell = row.get(index).map_or(&[][..], Vec::as_slice);
+        for span in fit_spans(cell, *width, base_style) {
+            append_span(&mut spans, span.content.as_ref(), span.style);
+        }
+        let used = spans_width(cell).min(*width);
+        if used < *width {
+            append_span(&mut spans, &" ".repeat(width - used), base_style);
+        }
+        append_span(&mut spans, " ", grid_style);
+        append_span(&mut spans, "│", grid_style);
+    }
+    Line::from(spans)
 }
 
 struct LineBuilder {
@@ -490,7 +744,7 @@ impl LineBuilder {
 }
 
 fn wrap_line(line: RichLine, width: usize, base_style: Style) -> Vec<Line<'static>> {
-    if line.kind == RichLineKind::Rule {
+    if matches!(line.kind, RichLineKind::Rule) {
         let prefix_width = UnicodeWidthStr::width(line.first_prefix.as_str());
         let rule_width = width.saturating_sub(prefix_width).max(1);
         return vec![Line::from(vec![
@@ -723,5 +977,38 @@ mod tests {
 
         assert!(rendered.contains("回答中："));
         assert!(rendered.contains("fn main()"));
+    }
+
+    #[test]
+    fn renders_tables_with_outer_and_inner_borders() {
+        let lines = render(
+            "| Name | Role |\n| --- | --- |\n| Noya | Agent |",
+            40,
+            Style::default(),
+        );
+        let rendered = text(&lines);
+
+        assert!(rendered.contains("┌"), "missing top border: {rendered:?}");
+        assert!(rendered.contains("┬"), "missing column junction: {rendered:?}");
+        assert!(rendered.contains("┐"), "missing top-right corner: {rendered:?}");
+        assert!(rendered.contains("├"), "missing header separator: {rendered:?}");
+        assert!(rendered.contains("┼"), "missing inner separator: {rendered:?}");
+        assert!(rendered.contains("┤"), "missing header right border: {rendered:?}");
+        assert!(rendered.contains("└"), "missing bottom border: {rendered:?}");
+        assert!(rendered.contains("┴"), "missing bottom junction: {rendered:?}");
+        assert!(rendered.contains("┘"), "missing bottom-right corner: {rendered:?}");
+    }
+
+    #[test]
+    fn keeps_wide_character_tables_within_terminal_width() {
+        let lines = render(
+            "| 模块名称 | 说明 |\n| --- | --- |\n| 后端服务 | 统一响应和错误处理 |",
+            24,
+            Style::default(),
+        );
+
+        assert!(lines.iter().all(|line| {
+            UnicodeWidthStr::width(line.to_string().as_str()) <= 24
+        }));
     }
 }

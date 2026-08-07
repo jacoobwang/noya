@@ -506,6 +506,12 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(DIM),
         ));
     }
+    if app.background_notifications > 0 {
+        spans.push(Span::styled(
+            format!("  · {} background notification(s)", app.background_notifications),
+            Style::default().fg(WARNING),
+        ));
+    }
     if !matches!(app.agent_state, AgentState::Idle | AgentState::Error) {
         spans.push(Span::styled("  Esc cancel", Style::default().fg(DIM)));
     }
@@ -854,7 +860,7 @@ mod tests {
         assert!(rendered.contains("› new"));
         assert!(rendered.contains("Start a new session"));
         assert!(rendered.contains("↑/↓ navigate"));
-        assert!(rendered.contains("(1/14)"));
+        assert!(rendered.contains("(1/15)"));
     }
 
     #[test]

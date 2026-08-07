@@ -49,6 +49,14 @@ pub struct Agent {
 }
 
 impl Agent {
+    pub fn config(&self) -> AgentConfig {
+        self.config.clone()
+    }
+
+    pub fn llm_client(&self) -> LlmClient {
+        self.llm.clone()
+    }
+
     pub fn new(config: AgentConfig, llm: LlmClient) -> Result<Self> {
         let session = Session::ephemeral(
             config.workspace.clone(),

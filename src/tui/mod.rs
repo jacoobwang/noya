@@ -11,20 +11,21 @@ pub use app::AppInfo;
 use app::{App, ModelChoice, TuiAction};
 
 use crate::{
-    Agent, AgentEvent, ApprovalPrompt, LlmClient, TurnControl,
+    Agent, AgentConfig, AgentEvent, ApprovalPrompt, LlmClient, TurnControl,
     model::{
         AuthenticationMode, CredentialStore, Model, ModelCatalogStore, ModelOverrides, ModelStatus,
         ProviderProtocol, RuntimeModelConfig,
     },
     session::{CreateSession, SessionFilter, SessionManager, SessionSummary, Transcript},
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use crossterm::terminal;
 use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend};
 use std::{
     collections::{HashMap, HashSet},
     io,
     ops::Range,
+    path::PathBuf,
     time::Duration,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -139,11 +140,44 @@ struct AgentHost {
     command_tx: mpsc::UnboundedSender<AgentCommand>,
     event_rx: mpsc::UnboundedReceiver<HostEvent>,
     approval_rx: mpsc::UnboundedReceiver<ApprovalPrompt>,
+    config: AgentConfig,
+    llm: LlmClient,
 }
 
-pub async fn run(agent: Agent, info: AppInfo) -> Result<()> {
+struct WorkerHost {
+    host: AgentHost,
+    status: WorkerStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerStatus {
+    Idle,
+    Running,
+    WaitingApproval,
+    Error,
+}
+
+struct PendingWorkerApproval {
+    request: crate::ApprovalRequest,
+    respond: oneshot::Sender<crate::ApprovalDecision>,
+}
+
+const DEFAULT_MAX_WORKERS: usize = 4;
+const MAX_PROJECT_HISTORY: usize = 10;
+
+pub async fn run(agent: Agent, info: AppInfo, max_workers: usize) -> Result<()> {
     let mut terminal = init_terminal()?;
-    let result = run_loop(&mut terminal, agent, info).await;
+    let result = run_loop(
+        &mut terminal,
+        agent,
+        info,
+        if max_workers == 0 {
+            DEFAULT_MAX_WORKERS
+        } else {
+            max_workers
+        },
+    )
+    .await;
     let restore = restore_terminal();
     match (result, restore) {
         (Err(error), _) => Err(error),
@@ -181,7 +215,12 @@ pub fn restore_terminal() -> Result<()> {
     Ok(())
 }
 
-async fn run_loop(terminal: &mut NoyaTerminal, agent: Agent, info: AppInfo) -> Result<()> {
+async fn run_loop(
+    terminal: &mut NoyaTerminal,
+    agent: Agent,
+    info: AppInfo,
+    max_workers: usize,
+) -> Result<()> {
     let mut app = App::new(info);
     app.load_session(
         agent.session_summary(),
@@ -193,108 +232,98 @@ async fn run_loop(terminal: &mut NoyaTerminal, agent: Agent, info: AppInfo) -> R
     flush_unrendered_messages(terminal, &app, &mut ui_runtime)?;
     render_welcome(terminal, &app.info)?;
     let mut input_events = event::EventHandler::new(Duration::from_millis(80));
-    let mut host = spawn_agent_host(
-        agent,
-        SessionManager::discover()?,
-        CredentialStore::discover()?,
-        ModelCatalogStore::discover()?,
-    );
+    let manager = SessionManager::discover()?;
+    let model_store = CredentialStore::discover()?;
+    let catalog_store = ModelCatalogStore::discover()?;
+    let initial_workspace = app.info.workspace.clone();
+    let mut workers = HashMap::from([(
+        initial_workspace.clone(),
+        WorkerHost {
+            host: spawn_agent_host(
+                agent,
+                manager.clone(),
+                model_store.clone(),
+                catalog_store.clone(),
+            ),
+            status: WorkerStatus::Idle,
+        },
+    )]);
+    let mut active_workspace = initial_workspace;
+    let mut pending_approvals: HashMap<PathBuf, PendingWorkerApproval> = HashMap::new();
     let mut approval_response: Option<(String, oneshot::Sender<crate::ApprovalDecision>)> = None;
 
     loop {
+        drain_worker_events(
+            &mut workers,
+            &mut app,
+            &active_workspace,
+            &mut pending_approvals,
+            &mut approval_response,
+        );
         flush_unrendered_messages(terminal, &app, &mut ui_runtime)?;
         let stream_view = ui_runtime.stream_view(&app);
         terminal.draw(|frame| ui::draw(frame, &app, stream_view))?;
 
-        tokio::select! {
-            Some(input_event) = input_events.next() => {
-                let action = match input_event {
-                    event::Event::Key(key) => event::handle_key_event(key, &mut app),
-                    event::Event::Quit => TuiAction::Quit,
-                    event::Event::Resize(width, height) => {
-                        tracing::debug!(width, height, "terminal resized");
-                        TuiAction::None
-                    }
-                    event::Event::Tick => TuiAction::None,
-                };
-                apply_action(
-                    action,
+        let Some(input_event) = input_events.next().await else {
+            break;
+        };
+        let action = match input_event {
+            event::Event::Key(key) => event::handle_key_event(key, &mut app),
+            event::Event::Quit => TuiAction::Quit,
+            event::Event::Resize(width, height) => {
+                tracing::debug!(width, height, "terminal resized");
+                TuiAction::None
+            }
+            event::Event::Tick => TuiAction::None,
+        };
+        match action {
+            TuiAction::ListProjects => {
+                let message = render_project_list(
+                    &manager,
+                    &workers,
+                    &active_workspace,
+                );
+                app.add_message(app::Message::new(app::MessageKind::System, message));
+            }
+            TuiAction::SwitchProject(target) => {
+                if let Err(error) = switch_project(
+                    &target,
+                    &manager,
+                    &model_store,
+                    &catalog_store,
+                    &mut workers,
+                    &mut active_workspace,
                     &mut app,
-                    &host.command_tx,
+                    &mut pending_approvals,
+                    &mut approval_response,
+                    &mut ui_runtime,
+                    max_workers,
+                ) {
+                    app.add_message(app::Message::new(
+                        app::MessageKind::Error,
+                        format!("Failed to switch project: {error}"),
+                    ));
+                    app.agent_state = app::AgentState::Idle;
+                }
+            }
+            other => {
+                let command_tx = workers
+                    .get(&active_workspace)
+                    .map(|worker| &worker.host.command_tx);
+                apply_action(
+                    other,
+                    &mut app,
+                    command_tx,
                     &mut approval_response,
                     &mut ui_runtime,
                 );
             }
-            Some(host_event) = host.event_rx.recv() => {
-                match host_event {
-                    HostEvent::Agent(agent_event) => {
-                        if matches!(agent_event, AgentEvent::TurnCompleted { .. }) {
-                            approval_response = None;
-                        }
-                        app.handle_agent_event(agent_event);
-                    }
-                    HostEvent::SessionChanged { summary, transcript, log_path, context_tokens } => {
-                        ui_runtime.clear();
-                        app.load_session(summary, transcript, log_path, context_tokens);
-                        app.add_message(app::Message::new(app::MessageKind::System, "Session ready."));
-                    }
-                    HostEvent::SessionUpdated { summary, log_path, context_tokens } => {
-                        app.update_session(summary, log_path, context_tokens);
-                    }
-                    HostEvent::SessionList(summaries) => {
-                        app.add_message(app::Message::new(
-                            app::MessageKind::System,
-                            render_session_list(&summaries),
-                        ));
-                    }
-                    HostEvent::ModelChoices(choices) => {
-                        app.open_model_menu(choices);
-                    }
-                    HostEvent::ModelSetupRequired { model, base_url } => {
-                        app.begin_model_setup(model.id().to_string(), base_url);
-                    }
-                    HostEvent::ModelSetupChoices {
-                        model,
-                        base_url,
-                        api_key,
-                        model_ids,
-                        protocol,
-                        authentication,
-                    } => {
-                        app.begin_model_selection(
-                            model,
-                            base_url,
-                            api_key,
-                            model_ids,
-                            protocol,
-                            authentication,
-                        );
-                    }
-                    HostEvent::RetrySubmitted(input) => {
-                        app.add_message(app::Message::new(app::MessageKind::User, input));
-                        app.agent_state = app::AgentState::Thinking;
-                    }
-                    HostEvent::Notice(message) => {
-                        app.add_message(app::Message::new(app::MessageKind::System, message));
-                        app.agent_state = app::AgentState::Idle;
-                    }
-                    HostEvent::CommandFailed(message) => {
-                        if app.mode == app::AppMode::ConfiguringModel {
-                            app.cancel_model_setup();
-                        }
-                        app.add_message(app::Message::new(app::MessageKind::Error, message));
-                        app.agent_state = app::AgentState::Idle;
-                    }
-                }
-            }
-            Some(prompt) = host.approval_rx.recv() => {
-                approval_response = Some((prompt.request.request_id.clone(), prompt.respond));
-            }
-            else => break,
         }
 
         if app.should_quit {
-            let _ = host.command_tx.send(AgentCommand::Shutdown);
+            for worker in workers.values() {
+                let _ = worker.host.command_tx.send(AgentCommand::Shutdown);
+            }
             break;
         }
     }
@@ -304,15 +333,16 @@ async fn run_loop(terminal: &mut NoyaTerminal, agent: Agent, info: AppInfo) -> R
 fn apply_action(
     action: TuiAction,
     app: &mut App,
-    command_tx: &mpsc::UnboundedSender<AgentCommand>,
+    command_tx: Option<&mpsc::UnboundedSender<AgentCommand>>,
     approval_response: &mut Option<(String, oneshot::Sender<crate::ApprovalDecision>)>,
     ui_runtime: &mut UiRuntime,
 ) {
+    let send = |command| command_tx.is_some_and(|sender| sender.send(command).is_ok());
     match action {
         TuiAction::None => {}
         TuiAction::Clear => ui_runtime.clear(),
         TuiAction::Submit(input) => {
-            if command_tx.send(AgentCommand::Submit(input)).is_err() {
+            if !send(AgentCommand::Submit(input)) {
                 app.handle_agent_event(AgentEvent::Error {
                     turn_id: None,
                     message: "Agent host is unavailable".to_string(),
@@ -321,31 +351,31 @@ fn apply_action(
             }
         }
         TuiAction::Reset => {
-            let _ = command_tx.send(AgentCommand::Reset);
+            let _ = send(AgentCommand::Reset);
         }
         TuiAction::NewSession => {
-            let _ = command_tx.send(AgentCommand::NewSession);
+            let _ = send(AgentCommand::NewSession);
         }
         TuiAction::ListModels => {
-            let _ = command_tx.send(AgentCommand::ListModels);
+            let _ = send(AgentCommand::ListModels);
         }
         TuiAction::ListSkills => {
-            let _ = command_tx.send(AgentCommand::ListSkills);
+            let _ = send(AgentCommand::ListSkills);
         }
         TuiAction::ActivateSkill(name) => {
-            let _ = command_tx.send(AgentCommand::ActivateSkill(name));
+            let _ = send(AgentCommand::ActivateSkill(name));
         }
         TuiAction::DeactivateSkill(name) => {
-            let _ = command_tx.send(AgentCommand::DeactivateSkill(name));
+            let _ = send(AgentCommand::DeactivateSkill(name));
         }
         TuiAction::ShowSkill(name) => {
-            let _ = command_tx.send(AgentCommand::ShowSkill(name));
+            let _ = send(AgentCommand::ShowSkill(name));
         }
         TuiAction::SwitchModel(model) => {
-            let _ = command_tx.send(AgentCommand::SwitchModel(model));
+            let _ = send(AgentCommand::SwitchModel(model));
         }
         TuiAction::SwitchModelTo { model, model_id } => {
-            let _ = command_tx.send(AgentCommand::SwitchModelTo { model, model_id });
+            let _ = send(AgentCommand::SwitchModelTo { model, model_id });
         }
         TuiAction::FetchModelChoices {
             model,
@@ -354,7 +384,7 @@ fn apply_action(
             protocol,
             authentication,
         } => {
-            let _ = command_tx.send(AgentCommand::FetchModelChoices {
+            let _ = send(AgentCommand::FetchModelChoices {
                 model,
                 base_url,
                 api_key,
@@ -370,7 +400,7 @@ fn apply_action(
             protocol,
             authentication,
         } => {
-            let _ = command_tx.send(AgentCommand::ConfigureModel {
+            let _ = send(AgentCommand::ConfigureModel {
                 model,
                 base_url,
                 api_key,
@@ -380,23 +410,23 @@ fn apply_action(
             });
         }
         TuiAction::ListSessions => {
-            let _ = command_tx.send(AgentCommand::ListSessions);
+            let _ = send(AgentCommand::ListSessions);
         }
         TuiAction::ResumeSession(prefix) => {
-            let _ = command_tx.send(AgentCommand::ResumeSession(prefix));
+            let _ = send(AgentCommand::ResumeSession(prefix));
         }
         TuiAction::RenameSession(title) => {
-            let _ = command_tx.send(AgentCommand::RenameSession(title));
+            let _ = send(AgentCommand::RenameSession(title));
         }
         TuiAction::Retry => {
-            let _ = command_tx.send(AgentCommand::Retry);
+            let _ = send(AgentCommand::Retry);
         }
         TuiAction::Compact => {
-            let _ = command_tx.send(AgentCommand::Compact);
+            let _ = send(AgentCommand::Compact);
         }
         TuiAction::Cancel => {
             app.status_message = Some("Cancelling current turn…".to_string());
-            let _ = command_tx.send(AgentCommand::Cancel);
+            let _ = send(AgentCommand::Cancel);
         }
         TuiAction::Approval(decision) => {
             let Some((request_id, _)) = approval_response.as_ref() else {
@@ -421,6 +451,7 @@ fn apply_action(
             }
         }
         TuiAction::Quit => app.should_quit = true,
+        TuiAction::ListProjects | TuiAction::SwitchProject(_) => unreachable!("handled by run loop"),
     }
 }
 
@@ -516,6 +547,8 @@ fn spawn_agent_host(
     model_store: CredentialStore,
     catalog_store: ModelCatalogStore,
 ) -> AgentHost {
+    let config = agent.config();
+    let llm = agent.llm_client();
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (approval_tx, approval_rx) = mpsc::unbounded_channel();
@@ -1011,6 +1044,415 @@ fn spawn_agent_host(
         command_tx,
         event_rx,
         approval_rx,
+        config,
+        llm,
+    }
+}
+
+fn drain_worker_events(
+    workers: &mut HashMap<PathBuf, WorkerHost>,
+    app: &mut App,
+    active_workspace: &PathBuf,
+    pending_approvals: &mut HashMap<PathBuf, PendingWorkerApproval>,
+    approval_response: &mut Option<(String, oneshot::Sender<crate::ApprovalDecision>)>,
+) {
+    let workspaces = workers.keys().cloned().collect::<Vec<_>>();
+    let mut events = Vec::new();
+    let mut approvals = Vec::new();
+    for workspace in workspaces {
+        let Some(worker) = workers.get_mut(&workspace) else {
+            continue;
+        };
+        while let Ok(event) = worker.host.event_rx.try_recv() {
+            events.push((workspace.clone(), event));
+        }
+        while let Ok(prompt) = worker.host.approval_rx.try_recv() {
+            approvals.push((workspace.clone(), prompt));
+        }
+    }
+
+    for (workspace, event) in events {
+        let is_active = &workspace == active_workspace;
+        if let Some(worker) = workers.get_mut(&workspace) {
+            match &event {
+                HostEvent::Agent(AgentEvent::TurnStarted { .. }) => {
+                    worker.status = WorkerStatus::Running;
+                }
+                HostEvent::Agent(AgentEvent::ApprovalRequired { .. }) => {
+                    worker.status = WorkerStatus::WaitingApproval;
+                }
+                HostEvent::Agent(AgentEvent::TurnCompleted { .. }) => {
+                    worker.status = WorkerStatus::Idle;
+                }
+                HostEvent::Agent(AgentEvent::Error { recoverable, .. }) => {
+                    worker.status = if *recoverable {
+                        WorkerStatus::Idle
+                    } else {
+                        WorkerStatus::Error
+                    };
+                }
+                HostEvent::SessionChanged { .. }
+                | HostEvent::SessionUpdated { .. }
+                | HostEvent::SessionList(_)
+                | HostEvent::ModelChoices(_)
+                | HostEvent::ModelSetupRequired { .. }
+                | HostEvent::ModelSetupChoices { .. }
+                | HostEvent::RetrySubmitted(_)
+                | HostEvent::Notice(_)
+                | HostEvent::CommandFailed(_)
+                | HostEvent::Agent(AgentEvent::TextDelta { .. })
+                | HostEvent::Agent(AgentEvent::ToolStarted { .. })
+                | HostEvent::Agent(AgentEvent::ToolFinished { .. }) => {}
+            }
+        }
+
+        match event {
+            HostEvent::Agent(agent_event) if is_active => {
+                if matches!(agent_event, AgentEvent::TurnCompleted { .. }) {
+                    *approval_response = None;
+                }
+                app.handle_agent_event(agent_event);
+            }
+            HostEvent::Agent(AgentEvent::Error { .. }) => {
+                if !is_active {
+                    app.notify_background_worker();
+                }
+            }
+            HostEvent::Agent(AgentEvent::TurnCompleted { .. }) => {
+                if !is_active {
+                    app.notify_background_worker();
+                }
+            }
+            HostEvent::SessionChanged {
+                summary,
+                transcript,
+                log_path,
+                context_tokens,
+            } if is_active => {
+                app.load_session(summary, transcript, log_path, context_tokens);
+                app.add_message(app::Message::new(
+                    app::MessageKind::System,
+                    "Session ready.",
+                ));
+            }
+            HostEvent::SessionUpdated {
+                summary,
+                log_path,
+                context_tokens,
+            } if is_active => app.update_session(summary, log_path, context_tokens),
+            HostEvent::SessionList(summaries) if is_active => app.add_message(app::Message::new(
+                app::MessageKind::System,
+                render_session_list(&summaries),
+            )),
+            HostEvent::ModelChoices(choices) if is_active => app.open_model_menu(choices),
+            HostEvent::ModelSetupRequired { model, base_url } if is_active => {
+                app.begin_model_setup(model.id().to_string(), base_url);
+            }
+            HostEvent::ModelSetupChoices {
+                model,
+                base_url,
+                api_key,
+                model_ids,
+                protocol,
+                authentication,
+            } if is_active => app.begin_model_selection(
+                model,
+                base_url,
+                api_key,
+                model_ids,
+                protocol,
+                authentication,
+            ),
+            HostEvent::RetrySubmitted(input) if is_active => {
+                app.add_message(app::Message::new(app::MessageKind::User, input));
+                app.agent_state = app::AgentState::Thinking;
+            }
+            HostEvent::Notice(message) if is_active => {
+                app.add_message(app::Message::new(app::MessageKind::System, message));
+                app.agent_state = app::AgentState::Idle;
+            }
+            HostEvent::CommandFailed(message) if is_active => {
+                if app.mode == app::AppMode::ConfiguringModel {
+                    app.cancel_model_setup();
+                }
+                app.add_message(app::Message::new(app::MessageKind::Error, message));
+                app.agent_state = app::AgentState::Idle;
+            }
+            HostEvent::Notice(_) | HostEvent::CommandFailed(_) if !is_active => {
+                app.notify_background_worker();
+            }
+            _ => {}
+        }
+    }
+
+    for (workspace, prompt) in approvals {
+        let request_id = prompt.request.request_id.clone();
+        if &workspace == active_workspace {
+            *approval_response = Some((request_id, prompt.respond));
+        } else {
+            pending_approvals.insert(
+                workspace,
+                PendingWorkerApproval {
+                    request: prompt.request,
+                    respond: prompt.respond,
+                },
+            );
+            app.notify_background_worker();
+        }
+    }
+}
+
+fn switch_project(
+    target: &str,
+    manager: &SessionManager,
+    model_store: &CredentialStore,
+    catalog_store: &ModelCatalogStore,
+    workers: &mut HashMap<PathBuf, WorkerHost>,
+    active_workspace: &mut PathBuf,
+    app: &mut App,
+    pending_approvals: &mut HashMap<PathBuf, PendingWorkerApproval>,
+    approval_response: &mut Option<(String, oneshot::Sender<crate::ApprovalDecision>)>,
+    ui_runtime: &mut UiRuntime,
+    max_workers: usize,
+) -> Result<()> {
+    let workspace = resolve_project_target(manager, target)?;
+    if workspace == *active_workspace {
+        app.agent_state = agent_state_for_worker(
+            workers.get(&workspace).map(|worker| worker.status),
+        );
+        return Ok(());
+    }
+
+    if approval_response.is_some() {
+        if let Some(request) = app.pending_approval.take() {
+            if let Some((_, respond)) = approval_response.take() {
+                pending_approvals.insert(
+                    active_workspace.clone(),
+                    PendingWorkerApproval {
+                        request,
+                        respond,
+                    },
+                );
+            }
+        }
+    }
+
+    if !workers.contains_key(&workspace) {
+        ensure_worker_capacity(workers.len(), max_workers)?;
+        let base_config = workers
+            .get(active_workspace)
+            .context("active Worker is unavailable")?
+            .host
+            .config
+            .clone();
+        let seed_llm = workers
+            .get(active_workspace)
+            .context("active Worker is unavailable")?
+            .host
+            .llm
+            .clone();
+        let worker_agent = build_worker_agent(
+            manager,
+            model_store,
+            base_config,
+            workspace.clone(),
+            app.info.model.clone(),
+            app.info.model_id.clone(),
+            seed_llm,
+        )?;
+        let host = spawn_agent_host(
+            worker_agent,
+            manager.clone(),
+            model_store.clone(),
+            catalog_store.clone(),
+        );
+        workers.insert(
+            workspace.clone(),
+            WorkerHost {
+                host,
+                status: WorkerStatus::Idle,
+            },
+        );
+    }
+
+    let summary = manager
+        .latest(&workspace)?
+        .context("project has no resumable session")?;
+    let snapshot = manager.show(summary.session_id)?;
+    let log_path = manager.log_path(summary.session_id).ok();
+    *active_workspace = workspace.clone();
+    ui_runtime.clear();
+    app.clear_background_notifications();
+    app.load_session(snapshot.summary, snapshot.transcript, log_path, 0);
+    app.add_message(app::Message::new(
+        app::MessageKind::System,
+        format!("Switched to project: {}", workspace.display()),
+    ));
+    if let Some(pending) = pending_approvals.remove(&workspace) {
+        let request = pending.request.clone();
+        *approval_response = Some((request.request_id.clone(), pending.respond));
+        app.handle_agent_event(AgentEvent::ApprovalRequired {
+            turn_id: crate::session::TurnId::new(),
+            request_id: request.request_id,
+            call_id: request.call_id,
+            tool_name: request.tool_name,
+            arguments: request.arguments,
+        });
+    }
+    app.agent_state = agent_state_for_worker(
+        workers.get(&workspace).map(|worker| worker.status),
+    );
+    Ok(())
+}
+
+fn resolve_project_target(manager: &SessionManager, target: &str) -> Result<PathBuf> {
+    if let Ok(index) = target.parse::<usize>() {
+        ensure!(index > 0, "project index starts at 1");
+        let projects = project_summaries(manager)?;
+        return projects
+            .get(index - 1)
+            .map(|summary| summary.workspace.clone())
+            .with_context(|| format!("project index {index} is not available"));
+    }
+    let path = if let Some(rest) = target.strip_prefix("~/") {
+        dirs::home_dir()
+            .context("cannot determine the user home directory")?
+            .join(rest)
+    } else {
+        PathBuf::from(target)
+    };
+    ensure!(path.is_dir(), "project path is not an accessible directory: {}", path.display());
+    path.canonicalize()
+        .with_context(|| format!("canonicalize project path {}", path.display()))
+}
+
+fn project_summaries(manager: &SessionManager) -> Result<Vec<SessionSummary>> {
+    let mut by_workspace = HashMap::<PathBuf, SessionSummary>::new();
+    for summary in manager.list(SessionFilter {
+        workspace: None,
+        include_archived: false,
+    })? {
+        by_workspace
+            .entry(summary.workspace.clone())
+            .and_modify(|current| {
+                if summary.updated_at > current.updated_at {
+                    *current = summary.clone();
+                }
+            })
+            .or_insert(summary);
+    }
+    let mut summaries = by_workspace.into_values().collect::<Vec<_>>();
+    summaries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    summaries.truncate(MAX_PROJECT_HISTORY);
+    Ok(summaries)
+}
+
+fn render_project_list(
+    manager: &SessionManager,
+    workers: &HashMap<PathBuf, WorkerHost>,
+    active_workspace: &PathBuf,
+) -> String {
+    let summaries = match project_summaries(manager) {
+        Ok(summaries) => summaries,
+        Err(error) => return format!("Failed to list projects: {error}"),
+    };
+    if summaries.is_empty() {
+        return "No projects found.".to_string();
+    }
+    let mut lines = vec!["Projects:".to_string()];
+    for (index, summary) in summaries.iter().enumerate() {
+        let marker = if &summary.workspace == active_workspace {
+            "*"
+        } else {
+            " "
+        };
+        let status = workers
+            .get(&summary.workspace)
+            .map(|worker| worker_status_label(worker.status))
+            .unwrap_or("stopped");
+        lines.push(format!(
+            "{marker} {:>2}. [{status:<16}] {}",
+            index + 1,
+            summary.workspace.display()
+        ));
+    }
+    lines.push("Use /project <index|path> to switch.".to_string());
+    lines.join("\n")
+}
+
+fn build_worker_agent(
+    manager: &SessionManager,
+    model_store: &CredentialStore,
+    mut config: AgentConfig,
+    workspace: PathBuf,
+    seed_model: String,
+    seed_model_id: String,
+    seed_llm: LlmClient,
+) -> Result<Agent> {
+    let workspace = workspace.canonicalize()?;
+    let session = match manager.latest(&workspace)? {
+        Some(summary) => manager.open(summary.session_id)?,
+        None => manager.create(CreateSession {
+            workspace: workspace.clone(),
+            model: seed_model.clone(),
+            model_id: seed_model_id,
+        })?,
+    };
+    let summary = session.summary();
+    let model = summary
+        .model
+        .parse::<Model>()
+        .map_err(anyhow::Error::msg)
+        .context("project session references an unsupported model")?;
+    config.workspace = workspace;
+    let llm = if summary.model == seed_model {
+        seed_llm
+    } else {
+        let runtime = RuntimeModelConfig::resolve(
+            ModelOverrides {
+                model: Some(model),
+                model_id: Some(summary.model_id.clone()),
+                ..ModelOverrides::default()
+            },
+            model_store,
+        )?;
+        LlmClient::with_settings(
+            reqwest::Client::new(),
+            runtime.base_url,
+            runtime.api_key,
+            runtime.model_id,
+            runtime.protocol,
+            runtime.authentication,
+        )
+        .with_custom_temperature(runtime.model.supports_custom_temperature())
+    };
+    Agent::with_session_for_model(config, llm, session, summary.model)
+}
+
+fn ensure_worker_capacity(current: usize, max_workers: usize) -> Result<()> {
+    ensure!(
+        current < max_workers.max(1),
+        "Worker limit reached ({})",
+        max_workers.max(1)
+    );
+    Ok(())
+}
+
+fn agent_state_for_worker(status: Option<WorkerStatus>) -> app::AgentState {
+    match status.unwrap_or(WorkerStatus::Error) {
+        WorkerStatus::Idle => app::AgentState::Idle,
+        WorkerStatus::Running => app::AgentState::Thinking,
+        WorkerStatus::WaitingApproval => app::AgentState::WaitingApproval,
+        WorkerStatus::Error => app::AgentState::Error,
+    }
+}
+
+fn worker_status_label(status: WorkerStatus) -> &'static str {
+    match status {
+        WorkerStatus::Idle => "idle",
+        WorkerStatus::Running => "running",
+        WorkerStatus::WaitingApproval => "waiting approval",
+        WorkerStatus::Error => "error",
     }
 }
 
@@ -1384,5 +1826,34 @@ mod tests {
         assert_eq!(choices[0].model_id, "gpt-4o");
         assert!(choices[0].current);
         assert_eq!(choices[1].model, "deepseek");
+    }
+
+    #[test]
+    fn project_history_deduplicates_workspaces() {
+        let data = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let manager = SessionManager::at(data.path());
+
+        let first_session = manager
+            .create(CreateSession {
+                workspace: first.path().to_path_buf(),
+                model: "qwen".to_string(),
+                model_id: "qwen3-coder-plus".to_string(),
+            })
+            .unwrap();
+        drop(first_session);
+        let second_session = manager
+            .create(CreateSession {
+                workspace: second.path().to_path_buf(),
+                model: "qwen".to_string(),
+                model_id: "qwen3-coder-plus".to_string(),
+            })
+            .unwrap();
+        drop(second_session);
+
+        let projects = project_summaries(&manager).unwrap();
+        assert_eq!(projects.len(), 2);
+        assert_ne!(projects[0].workspace, projects[1].workspace);
     }
 }
