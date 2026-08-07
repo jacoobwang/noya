@@ -1,10 +1,11 @@
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::session::TurnId;
 use super::diagnostics::TurnDiagnostics;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AgentEvent {
     TurnStarted {
         turn_id: TurnId,

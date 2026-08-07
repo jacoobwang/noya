@@ -5,6 +5,7 @@
 //! desktop host without moving coding-agent policy into the transport.
 
 pub mod agent;
+pub mod daemon;
 pub mod llm;
 pub mod model;
 pub mod session;

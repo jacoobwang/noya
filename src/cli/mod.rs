@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use noya::{
-    Agent, AgentConfig, AutonomousConfig, LlmClient, QualityGateConfig,
+    Agent, AgentConfig, AutonomousConfig, LlmClient, QualityGateConfig, daemon,
     model::{
         AuthenticationMode, CredentialStore, Model, ModelOverrides, ModelStatus,
         ProviderProtocol, RuntimeModelConfig,
@@ -15,7 +15,7 @@ use std::{
     env, fs,
     io::{self, Write},
     path::{Path, PathBuf},
-    process::Command as ProcessCommand,
+    process::{Command as ProcessCommand, Stdio},
 };
 
 #[derive(Parser)]
@@ -96,6 +96,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run and connect to a resident local Agent daemon.
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
     /// Upgrade the installed Noya binary to the latest release.
     Upgrade {
         /// Install a specific release tag instead of the latest release.
@@ -145,6 +150,28 @@ enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum DaemonCommand {
+    /// Start a background daemon for the selected workspace.
+    Start,
+    /// Run the daemon in the foreground. Used by `daemon start`.
+    #[command(hide = true)]
+    Run,
+    /// Attach an interactive client to the resident daemon.
+    Attach {
+        /// Stable client ID used to resume the event cursor.
+        #[arg(long)]
+        client_id: Option<String>,
+        /// Reconnect after a daemon/socket interruption.
+        #[arg(long)]
+        reconnect: bool,
+    },
+    /// Show daemon/session state as JSON.
+    Status,
+    /// Ask the resident daemon to stop.
+    Stop,
 }
 
 #[derive(Subcommand)]
@@ -212,6 +239,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
 
 async fn run_with_store(cli: Cli, command: Option<Command>, store: &CredentialStore) -> Result<()> {
     match command {
+        Some(Command::Daemon { command }) => daemon_command(cli, command, store).await,
         Some(Command::Login {
             model,
             protocol,
@@ -417,6 +445,154 @@ fn render_models(statuses: &[ModelStatus]) -> String {
     lines.join("\n")
 }
 
+async fn daemon_command(
+    cli: Cli,
+    command: DaemonCommand,
+    store: &CredentialStore,
+) -> Result<()> {
+    match command {
+        DaemonCommand::Start => daemon_start(&cli).await,
+        DaemonCommand::Run => daemon_run(&cli, store).await,
+        DaemonCommand::Attach {
+            client_id,
+            reconnect,
+        } => daemon::attach(
+            client_id.unwrap_or_else(|| format!("attach-{}", Uuid::new_v4())),
+            reconnect,
+        )
+        .await,
+        DaemonCommand::Status => {
+            let snapshot = daemon::status().await?;
+            println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            Ok(())
+        }
+        DaemonCommand::Stop => {
+            daemon::stop().await?;
+            println!("Noya daemon stop requested.");
+            Ok(())
+        }
+    }
+}
+
+async fn daemon_start(cli: &Cli) -> Result<()> {
+    if daemon::status().await.is_ok() {
+        println!("Noya daemon is already running.");
+        return Ok(());
+    }
+
+    let executable = env::current_exe().context("find the Noya executable")?;
+    let paths = daemon::DaemonPaths::discover()?;
+    fs::create_dir_all(&paths.root)
+        .with_context(|| format!("create daemon directory {}", paths.root.display()))?;
+    let log_path = paths.root.join("daemon.log");
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("open daemon log {}", log_path.display()))?;
+    let log_stderr = log.try_clone().context("clone daemon log handle")?;
+    let mut child = ProcessCommand::new(executable);
+    if let Some(workspace) = &cli.workspace {
+        child.arg("--workspace").arg(workspace);
+    }
+    if let Some(model) = cli.model {
+        child.arg("--model").arg(model.to_string());
+    }
+    if let Some(base_url) = &cli.base_url {
+        child.arg("--base-url").arg(base_url);
+    }
+    if let Some(model_id) = &cli.model_id {
+        child.arg("--model-id").arg(model_id);
+    }
+    child
+        .arg("--max-tool-loops")
+        .arg(cli.max_tool_loops.to_string())
+        .arg("--tool-timeout-seconds")
+        .arg(cli.tool_timeout_seconds.to_string())
+        .arg("--max-tool-output-bytes")
+        .arg(cli.max_tool_output_bytes.to_string())
+        .arg("--tool-approval")
+        .arg(cli.tool_approval.as_str());
+    if !cli.blocked_tools.is_empty() {
+        child.arg("--blocked-tools").arg(cli.blocked_tools.join(","));
+    }
+    child
+        .arg("daemon")
+        .arg("run")
+        .envs(std::env::vars())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_stderr));
+    if let Some(api_key) = &cli.api_key {
+        child.env("OPENAI_COMPAT_API_KEY", api_key);
+    }
+    let child = child.spawn().context("spawn Noya daemon")?;
+    for _ in 0..30 {
+        if let Ok(snapshot) = daemon::status().await {
+            println!(
+                "Noya daemon started (pid {}, session {}).",
+                child.id(),
+                snapshot.summary.session_id
+            );
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    bail!(
+        "Noya daemon did not become ready; inspect {}",
+        log_path.display()
+    )
+}
+
+async fn daemon_run(cli: &Cli, store: &CredentialStore) -> Result<()> {
+    let workspace = resolve_workspace(cli.workspace.as_deref())?;
+    let manager = SessionManager::discover()?;
+    let latest = manager.latest(&workspace)?;
+    let (session, model) = if let Some(summary) = latest {
+        let session_model = summary
+            .model
+            .parse::<Model>()
+            .map_err(anyhow::Error::msg)
+            .context("session references an unsupported model")?;
+        let selected_model = cli.model.unwrap_or(session_model);
+        let model_id = match (&cli.model_id, cli.model) {
+            (Some(model_id), _) => Some(model_id.clone()),
+            (None, Some(explicit_model)) if explicit_model != session_model => None,
+            (None, _) => Some(summary.model_id.clone()),
+        };
+        let model = RuntimeModelConfig::resolve(
+            ModelOverrides {
+                model: Some(selected_model),
+                api_key: cli.api_key.clone(),
+                base_url: cli.base_url.clone(),
+                model_id,
+                ..ModelOverrides::default()
+            },
+            store,
+        )?;
+        (manager.open(summary.session_id)?, model)
+    } else {
+        let model = RuntimeModelConfig::resolve(
+            ModelOverrides {
+                model: cli.model,
+                api_key: cli.api_key.clone(),
+                base_url: cli.base_url.clone(),
+                model_id: cli.model_id.clone(),
+                ..ModelOverrides::default()
+            },
+            store,
+        )?;
+        let session = manager.create(CreateSession {
+            workspace: workspace.clone(),
+            model: model.model.to_string(),
+            model_id: model.model_id.clone(),
+        })?;
+        (session, model)
+    };
+    let agent = agent_for_session(cli, model, session, workspace)?;
+    daemon::serve(agent).await
+}
+
 async fn run_new_agent(cli: Cli, store: &CredentialStore) -> Result<()> {
     let model = RuntimeModelConfig::resolve(
         ModelOverrides {
@@ -497,7 +673,30 @@ async fn run_tui(
     session: noya::session::Session,
     workspace: PathBuf,
 ) -> Result<()> {
-    let agent = Agent::with_session_for_model(
+    let app_model = model.model.to_string();
+    let app_model_id = model.model_id.clone();
+    let agent = agent_for_session(&cli, model, session, workspace.clone())?;
+    tui::run_with_options(
+        agent,
+        tui::AppInfo {
+            workspace,
+            model: app_model,
+            model_id: app_model_id,
+        },
+        cli.max_workers,
+        autonomous_config(&cli),
+        cli.autonomous.clone(),
+    )
+    .await
+}
+
+fn agent_for_session(
+    cli: &Cli,
+    model: RuntimeModelConfig,
+    session: noya::session::Session,
+    workspace: PathBuf,
+) -> Result<Agent> {
+    Agent::with_session_for_model(
         AgentConfig {
             workspace: workspace.clone(),
             max_tool_loops: cli.max_tool_loops,
@@ -521,19 +720,7 @@ async fn run_tui(
             .with_custom_temperature(model.model.supports_custom_temperature()),
         session,
         model.model.to_string(),
-    )?;
-    tui::run_with_options(
-        agent,
-        tui::AppInfo {
-            workspace,
-            model: model.model.to_string(),
-            model_id: model.model_id,
-        },
-        cli.max_workers,
-        autonomous_config(&cli),
-        cli.autonomous.clone(),
     )
-    .await
 }
 
 fn autonomous_config(cli: &Cli) -> AutonomousConfig {
@@ -851,6 +1038,31 @@ mod tests {
         assert!(matches!(
             uninstall.command,
             Some(Command::Uninstall { yes: true })
+        ));
+    }
+
+    #[test]
+    fn parses_daemon_lifecycle_commands() {
+        let start = Cli::try_parse_from(["noya", "daemon", "start"]).unwrap();
+        assert!(matches!(start.command, Some(Command::Daemon { command: DaemonCommand::Start })));
+
+        let attach = Cli::try_parse_from([
+            "noya",
+            "daemon",
+            "attach",
+            "--client-id",
+            "laptop",
+            "--reconnect",
+        ])
+        .unwrap();
+        assert!(matches!(
+            attach.command,
+            Some(Command::Daemon {
+                command: DaemonCommand::Attach {
+                    client_id: Some(ref client_id),
+                    reconnect: true,
+                }
+            }) if client_id == "laptop"
         ));
     }
 

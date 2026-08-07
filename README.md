@@ -7,7 +7,7 @@ Noya is a standalone coding-agent prototype focused on development tasks inside 
 ## Architecture
 
 ```text
-CLI / future HTTP host
+CLI / daemon attach / future HTTP host
           |
        Agent  ← turn/tool loop + events
       /  |  \
@@ -31,6 +31,7 @@ src/
   session/  append-only JSONL, replay projections, recovery, and compaction
   tools/    tool registry, filesystem/patch/Git tools, and command execution
   tui/      terminal host, state, input events, and rendering
+  daemon/   resident Agent process, Unix socket protocol, and event replay
 ```
 
 ## Install a prebuilt release
@@ -200,6 +201,22 @@ noya --autonomous "Implement and verify the migration" \
   --autonomous-gate "cargo test --lib" \
   --autonomous-max-turns 12
 ```
+
+For a long-running process that survives terminal disconnects, start the local daemon and attach one or more CLI clients:
+
+```bash
+noya --workspace /path/to/repo daemon start
+noya --workspace /path/to/repo daemon status
+noya --workspace /path/to/repo daemon attach --client-id laptop --reconnect
+
+# In the attach client:
+#   /status   request a fresh durable snapshot
+#   /detach   leave the daemon running
+#   /quit     leave the daemon running
+noya daemon stop
+```
+
+The daemon owns the session lock and Agent process. It listens on a Unix socket under `NOYA_DATA_DIR` (or `~/.noya/daemon.sock`), keeps a bounded in-memory event replay buffer, and returns a durable session snapshot when a reconnect crosses a daemon generation or falls outside the replay window. The client sends a stable `--client-id` and its last `{generation, sequence}` cursor, so reconnect does not require starting a new session.
 
 Session data is stored below `NOYA_DATA_DIR` when set, otherwise in `~/.noya/`. Each session has an append-only `events.jsonl`, derived `meta.json`, a transient streaming checkpoint, and an advisory lock. Session logs may contain source code, prompts, model reasoning, tool arguments, and command output; protect them as sensitive local data. API keys are never written to session files.
 
