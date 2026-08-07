@@ -14,7 +14,8 @@ pub mod tui;
 
 pub use agent::{
     Agent, AgentConfig, AgentDiagnostics, AgentEvent, ApprovalDecision, ApprovalPrompt,
-    ApprovalRequest, TurnControl, TurnDiagnostics,
+    ApprovalRequest, AutonomousConfig, AutonomousReport, AutonomousStatus, AutonomousStopReason,
+    QualityGateConfig, QualityGateFailure, TurnControl, TurnDiagnostics,
 };
 pub use llm::{
     ChatMessage, ChatRequest, ChatResponse, ChatStreamResponse, CostRates, LlmClient, LlmEvent,

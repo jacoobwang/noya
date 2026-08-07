@@ -68,6 +68,8 @@ const COMMANDS: &[SlashCommand] = &[
     SlashCommand::optional("model", "[name]", "Choose or configure a model"),
     SlashCommand::optional("skill", "[name]", "List, activate, or manage Skills"),
     SlashCommand::always("sessions", None, "List sessions for this workspace"),
+    SlashCommand::optional("goal", "[objective]", "Create or inspect the persistent goal"),
+    SlashCommand::always("autonomous", Some("<prompt>"), "Run a bounded autonomous prompt"),
     SlashCommand::always("tree", None, "Show the session tree and branches"),
     SlashCommand::always("branch", Some("<name>"), "Create or select a session branch"),
     SlashCommand::optional("project", "[index|path]", "List or switch project workers"),

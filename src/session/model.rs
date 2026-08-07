@@ -65,6 +65,50 @@ pub enum SessionStatus {
     Archived,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalStatus {
+    Idle,
+    Active,
+    Paused,
+    BudgetLimited,
+    Complete,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoalState {
+    pub goal_id: Option<Uuid>,
+    pub objective: Option<String>,
+    pub status: GoalStatus,
+    pub token_budget: Option<u64>,
+    pub tokens_used: u64,
+    pub time_used_seconds: u64,
+    pub continuations_used: u64,
+    pub last_reason: Option<String>,
+}
+
+impl Default for GoalState {
+    fn default() -> Self {
+        Self {
+            goal_id: None,
+            objective: None,
+            status: GoalStatus::Idle,
+            token_budget: None,
+            tokens_used: 0,
+            time_used_seconds: 0,
+            continuations_used: 0,
+            last_reason: None,
+        }
+    }
+}
+
+impl GoalState {
+    pub fn is_active(&self) -> bool {
+        self.status == GoalStatus::Active
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub schema_version: u32,
@@ -90,6 +134,8 @@ pub struct SessionSummary {
     pub active_head_seq: u64,
     #[serde(default)]
     pub branch_count: usize,
+    #[serde(default)]
+    pub goal: GoalState,
     pub archived: bool,
     #[serde(default)]
     pub active_skills: Vec<ActiveSkillRecord>,

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use noya::{
-    Agent, AgentConfig, LlmClient,
+    Agent, AgentConfig, AutonomousConfig, LlmClient, QualityGateConfig,
     model::{
         AuthenticationMode, CredentialStore, Model, ModelOverrides, ModelStatus,
         ProviderProtocol, RuntimeModelConfig,
@@ -66,6 +66,32 @@ pub struct Cli {
     /// Comma-separated tool names that must never execute.
     #[arg(long, env = "NOYA_BLOCKED_TOOLS", value_delimiter = ',')]
     blocked_tools: Vec<String>,
+
+    /// Run an initial prompt in bounded autonomous mode.
+    #[arg(long)]
+    autonomous: Option<String>,
+
+    /// Quality gate command; may be repeated.
+    #[arg(long = "autonomous-gate")]
+    autonomous_gates: Vec<String>,
+
+    #[arg(long, default_value_t = 3)]
+    autonomous_max_continuations: usize,
+
+    #[arg(long, default_value_t = 12)]
+    autonomous_max_turns: usize,
+
+    #[arg(long, default_value_t = 80_000)]
+    autonomous_max_tokens: u64,
+
+    #[arg(long, default_value_t = 1_800_000)]
+    autonomous_timeout_ms: u64,
+
+    #[arg(long, default_value_t = 3)]
+    autonomous_gate_retries: usize,
+
+    #[arg(long, default_value_t = 300_000)]
+    autonomous_gate_timeout_ms: u64,
 }
 
 #[derive(Subcommand)]
@@ -496,7 +522,7 @@ async fn run_tui(
         session,
         model.model.to_string(),
     )?;
-    tui::run(
+    tui::run_with_options(
         agent,
         tui::AppInfo {
             workspace,
@@ -504,8 +530,26 @@ async fn run_tui(
             model_id: model.model_id,
         },
         cli.max_workers,
+        autonomous_config(&cli),
+        cli.autonomous.clone(),
     )
     .await
+}
+
+fn autonomous_config(cli: &Cli) -> AutonomousConfig {
+    let defaults = AutonomousConfig::default();
+    AutonomousConfig {
+        max_continuations: cli.autonomous_max_continuations,
+        max_turns: cli.autonomous_max_turns,
+        max_tokens: cli.autonomous_max_tokens,
+        timeout_ms: cli.autonomous_timeout_ms,
+        continuation_prompt: defaults.continuation_prompt,
+        gates: QualityGateConfig {
+            commands: cli.autonomous_gates.clone(),
+            max_retries: cli.autonomous_gate_retries,
+            timeout_ms: cli.autonomous_gate_timeout_ms,
+        },
+    }
 }
 
 fn sessions(cli: &Cli, all: bool, archived: bool, json: bool) -> Result<()> {
@@ -766,6 +810,20 @@ mod tests {
         assert_eq!(run.tool_approval, ToolApprovalMode::Mutating);
         assert!(run.blocked_tools.is_empty());
         assert!(run.command.is_none());
+
+        let autonomous = Cli::try_parse_from([
+            "noya",
+            "--autonomous",
+            "finish the migration",
+            "--autonomous-gate",
+            "cargo test --lib",
+            "--autonomous-max-turns",
+            "8",
+        ])
+        .unwrap();
+        assert_eq!(autonomous.autonomous.as_deref(), Some("finish the migration"));
+        assert_eq!(autonomous.autonomous_gates, vec!["cargo test --lib"]);
+        assert_eq!(autonomous.autonomous_max_turns, 8);
 
         let restricted = Cli::try_parse_from([
             "noya",

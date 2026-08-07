@@ -190,6 +190,7 @@ fn event_type(event: &SessionEvent) -> String {
         SessionEvent::BranchCreated { .. } => "branch_created",
         SessionEvent::BranchSelected { .. } => "branch_selected",
         SessionEvent::BranchSummary { .. } => "branch_summary",
+        SessionEvent::GoalChanged { .. } => "goal_changed",
         SessionEvent::SessionArchived => "session_archived",
     }
     .to_string()

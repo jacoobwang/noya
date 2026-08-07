@@ -9,8 +9,9 @@ mod recovery;
 mod tree;
 
 pub use model::{
-    ActiveSkillRecord, AssistantRecord, CompactionRecord, CreateSession, ExportFormat, ModelContext,
-    RunId, RuntimeSnapshot, SessionFilter, SessionId, SessionSnapshot, SessionStatus, SessionSummary,
+    ActiveSkillRecord, AssistantRecord, CompactionRecord, CreateSession, ExportFormat, GoalState,
+    GoalStatus, ModelContext, RunId, RuntimeSnapshot, SessionFilter, SessionId, SessionSnapshot,
+    SessionStatus, SessionSummary,
     SessionBranch, SessionTree, SessionTreeNode, ToolCallRecord, ToolResultRecord, Transcript,
     TranscriptItem, TranscriptKind, TurnFailure, TurnId,
 };
@@ -478,6 +479,74 @@ impl Session {
 
     pub fn tree(&self) -> SessionTree {
         self.projection.tree()
+    }
+
+    pub fn goal(&self) -> GoalState {
+        self.projection.summary().goal
+    }
+
+    pub fn start_goal(&mut self, objective: impl Into<String>, token_budget: Option<u64>) -> Result<()> {
+        ensure!(!self.projection.has_active_turn(), "cannot change a goal during an active turn");
+        let objective = objective.into().trim().to_string();
+        ensure!(!objective.is_empty(), "goal objective cannot be empty");
+        ensure!(objective.chars().count() <= 4000, "goal objective cannot exceed 4000 characters");
+        if let Some(budget) = token_budget {
+            ensure!(budget > 0, "goal token budget must be positive");
+        }
+        self.append(
+            SessionEvent::GoalChanged {
+                state: GoalState {
+                    goal_id: Some(Uuid::new_v4()),
+                    objective: Some(objective),
+                    status: GoalStatus::Active,
+                    token_budget,
+                    tokens_used: 0,
+                    time_used_seconds: 0,
+                    continuations_used: 0,
+                    last_reason: None,
+                },
+            },
+            None,
+            true,
+        )?;
+        Ok(())
+    }
+
+    pub fn update_goal_status(&mut self, status: GoalStatus, reason: Option<String>) -> Result<()> {
+        ensure!(!self.projection.has_active_turn(), "cannot change a goal during an active turn");
+        let mut state = self.goal();
+        if status == GoalStatus::Idle {
+            state = GoalState::default();
+        } else {
+            ensure!(state.objective.is_some(), "no goal is active");
+            state.status = status;
+            state.last_reason = reason;
+        }
+        self.append(SessionEvent::GoalChanged { state }, None, true)?;
+        Ok(())
+    }
+
+    pub(crate) fn record_goal_usage(
+        &mut self,
+        tokens: u64,
+        elapsed_seconds: u64,
+        continuation: bool,
+    ) -> Result<()> {
+        let mut state = self.goal();
+        if !state.is_active() {
+            return Ok(());
+        }
+        state.tokens_used = state.tokens_used.saturating_add(tokens);
+        state.time_used_seconds = state.time_used_seconds.saturating_add(elapsed_seconds);
+        if continuation {
+            state.continuations_used = state.continuations_used.saturating_add(1);
+        }
+        if state.token_budget.is_some_and(|budget| state.tokens_used >= budget) {
+            state.status = GoalStatus::BudgetLimited;
+            state.last_reason = Some("token budget reached".to_string());
+        }
+        self.append(SessionEvent::GoalChanged { state }, None, true)?;
+        Ok(())
     }
 
     pub fn create_branch(&mut self, name: impl Into<String>, from_seq: Option<u64>) -> Result<Uuid> {
@@ -1281,6 +1350,28 @@ mod tests {
             .messages
             .iter()
             .any(|message| message.content.contains("second question")));
+    }
+
+    #[test]
+    fn goal_state_is_durable_and_budget_limited() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let manager = SessionManager::at(directory.path());
+        let mut session = create_test_session(&manager, &workspace);
+        let session_id = *session.id();
+
+        session.start_goal("finish and verify the migration", Some(100)).unwrap();
+        assert_eq!(session.goal().status, GoalStatus::Active);
+        session.record_goal_usage(60, 4, true).unwrap();
+        assert_eq!(session.goal().tokens_used, 60);
+        session.record_goal_usage(40, 3, true).unwrap();
+        assert_eq!(session.goal().status, GoalStatus::BudgetLimited);
+        drop(session);
+
+        let reopened = manager.open(session_id).unwrap();
+        assert_eq!(reopened.goal().tokens_used, 100);
+        assert_eq!(reopened.goal().continuations_used, 2);
+        assert_eq!(reopened.goal().status, GoalStatus::BudgetLimited);
     }
 
     #[test]

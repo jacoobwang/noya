@@ -2,8 +2,8 @@ use super::{
     compaction::KEEP_RECENT_TURNS,
     event::{EventEnvelope, SCHEMA_VERSION, SessionEvent},
     model::{
-        ActiveSkillRecord, CompactionPlan, ModelContext, SessionStatus, SessionSummary, Transcript,
-        SessionTree, SessionTreeNode, TranscriptItem, TranscriptKind, TurnId,
+        ActiveSkillRecord, CompactionPlan, GoalState, ModelContext, SessionStatus, SessionSummary,
+        SessionTree, SessionTreeNode, Transcript, TranscriptItem, TranscriptKind, TurnId,
     },
 };
 use crate::llm::ChatMessage;
@@ -76,6 +76,7 @@ impl Projection {
                 active_branch_id: None,
                 active_head_seq: 1,
                 branch_count: 0,
+                goal: GoalState::default(),
                 archived: false,
                 active_skills: Vec::new(),
             },
@@ -470,6 +471,13 @@ impl Projection {
                     tool_call_id: None,
                     interrupted: false,
                 });
+            }
+            SessionEvent::GoalChanged { state } => {
+                ensure!(
+                    self.active.is_none(),
+                    "cannot change a goal during an active turn"
+                );
+                self.meta.goal = state.clone();
             }
             SessionEvent::SessionArchived => {
                 ensure!(self.active.is_none(), "cannot archive an active session");

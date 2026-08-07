@@ -11,12 +11,13 @@ pub use app::AppInfo;
 use app::{App, ModelChoice, TuiAction};
 
 use crate::{
-    Agent, AgentConfig, AgentEvent, ApprovalPrompt, LlmClient, TurnControl,
+    Agent, AgentConfig, AgentEvent, ApprovalPrompt, AutonomousConfig, AutonomousReport, LlmClient,
+    TurnControl,
     model::{
         AuthenticationMode, CredentialStore, Model, ModelCatalogStore, ModelOverrides, ModelStatus,
         ProviderProtocol, RuntimeModelConfig,
     },
-    session::{CreateSession, SessionFilter, SessionManager, SessionSummary, SessionTree, Transcript},
+    session::{CreateSession, GoalState, GoalStatus, SessionFilter, SessionManager, SessionSummary, SessionTree, Transcript},
 };
 use anyhow::{Context, Result, bail, ensure};
 use crossterm::terminal;
@@ -96,6 +97,16 @@ enum AgentCommand {
         authentication: AuthenticationMode,
     },
     ListSessions,
+    ShowGoal,
+    StartGoal {
+        objective: String,
+        token_budget: Option<u64>,
+    },
+    UpdateGoalStatus {
+        status: GoalStatus,
+        reason: Option<String>,
+    },
+    Autonomous(String),
     ShowTree,
     CreateBranch(String),
     SelectBranch {
@@ -172,6 +183,23 @@ const DEFAULT_MAX_WORKERS: usize = 4;
 const MAX_PROJECT_HISTORY: usize = 10;
 
 pub async fn run(agent: Agent, info: AppInfo, max_workers: usize) -> Result<()> {
+    run_with_options(
+        agent,
+        info,
+        max_workers,
+        AutonomousConfig::from_environment(),
+        None,
+    )
+    .await
+}
+
+pub async fn run_with_options(
+    agent: Agent,
+    info: AppInfo,
+    max_workers: usize,
+    autonomous_config: AutonomousConfig,
+    initial_autonomous_prompt: Option<String>,
+) -> Result<()> {
     let mut terminal = init_terminal()?;
     let result = run_loop(
         &mut terminal,
@@ -182,6 +210,8 @@ pub async fn run(agent: Agent, info: AppInfo, max_workers: usize) -> Result<()> 
         } else {
             max_workers
         },
+        autonomous_config,
+        initial_autonomous_prompt,
     )
     .await;
     let restore = restore_terminal();
@@ -226,6 +256,8 @@ async fn run_loop(
     agent: Agent,
     info: AppInfo,
     max_workers: usize,
+    autonomous_config: AutonomousConfig,
+    initial_autonomous_prompt: Option<String>,
 ) -> Result<()> {
     let mut app = App::new(info);
     app.load_session(
@@ -242,6 +274,7 @@ async fn run_loop(
     let model_store = CredentialStore::discover()?;
     let catalog_store = ModelCatalogStore::discover()?;
     let initial_workspace = app.info.workspace.clone();
+    let mut active_workspace = initial_workspace.clone();
     let mut workers = HashMap::from([(
         initial_workspace.clone(),
         WorkerHost {
@@ -250,11 +283,16 @@ async fn run_loop(
                 manager.clone(),
                 model_store.clone(),
                 catalog_store.clone(),
+                autonomous_config,
             ),
             status: WorkerStatus::Idle,
         },
     )]);
-    let mut active_workspace = initial_workspace;
+    if let Some(prompt) = initial_autonomous_prompt {
+        if let Some(worker) = workers.get(&active_workspace) {
+            let _ = worker.host.command_tx.send(AgentCommand::Autonomous(prompt));
+        }
+    }
     let mut pending_approvals: HashMap<PathBuf, PendingWorkerApproval> = HashMap::new();
     let mut approval_response: Option<(String, oneshot::Sender<crate::ApprovalDecision>)> = None;
 
@@ -418,6 +456,24 @@ fn apply_action(
         TuiAction::ListSessions => {
             let _ = send(AgentCommand::ListSessions);
         }
+        TuiAction::ShowGoal => {
+            let _ = send(AgentCommand::ShowGoal);
+        }
+        TuiAction::StartGoal {
+            objective,
+            token_budget,
+        } => {
+            let _ = send(AgentCommand::StartGoal {
+                objective,
+                token_budget,
+            });
+        }
+        TuiAction::UpdateGoalStatus { status, reason } => {
+            let _ = send(AgentCommand::UpdateGoalStatus { status, reason });
+        }
+        TuiAction::Autonomous(input) => {
+            let _ = send(AgentCommand::Autonomous(input));
+        }
         TuiAction::ShowTree => {
             let _ = send(AgentCommand::ShowTree);
         }
@@ -561,6 +617,7 @@ fn spawn_agent_host(
     manager: SessionManager,
     model_store: CredentialStore,
     catalog_store: ModelCatalogStore,
+    autonomous_config: AutonomousConfig,
 ) -> AgentHost {
     let config = agent.config();
     let llm = agent.llm_client();
@@ -631,6 +688,59 @@ fn spawn_agent_host(
                 command => command,
             };
             match command {
+                AgentCommand::Autonomous(input) => {
+                    let run_config = autonomous_config.clone();
+                    let turn_events = event_tx.clone();
+                    let control = TurnControl::non_interactive();
+                    let active_control = control.clone();
+                    let mut task = tokio::spawn(async move {
+                        let result = agent.run_autonomous(
+                            input,
+                            run_config,
+                            control,
+                            |event| {
+                                let _ = turn_events.send(HostEvent::Agent(event));
+                            },
+                        ).await;
+                        (agent, result)
+                    });
+                    let (returned_agent, result) = loop {
+                        tokio::select! {
+                            joined = &mut task => {
+                                match joined {
+                                    Ok(result) => break result,
+                                    Err(error) => {
+                                        send_host_error(
+                                            &event_tx,
+                                            &format!("Autonomous task failed: {error}"),
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+                            next = command_rx.recv() => match next {
+                                Some(AgentCommand::Cancel) => active_control.cancel(),
+                                Some(AgentCommand::Shutdown) | None => {
+                                    active_control.cancel();
+                                    let _ = task.await;
+                                    return;
+                                }
+                                Some(_) => send_host_error(&event_tx, "Agent is busy"),
+                            }
+                        }
+                    };
+                    agent = returned_agent;
+                    match result {
+                        Ok(report) => {
+                            let _ = event_tx.send(session_updated(&agent));
+                            let _ = event_tx.send(HostEvent::Notice(render_autonomous_report(&report)));
+                        }
+                        Err(error) => send_host_error(
+                            &event_tx,
+                            &format!("Autonomous run failed: {error}"),
+                        ),
+                    }
+                }
                 AgentCommand::Submit(input) => {
                     let active_summary = agent.session_summary();
                     let active_workspace = active_summary.workspace.clone();
@@ -720,6 +830,10 @@ fn spawn_agent_host(
                                 | Some(AgentCommand::ListSkills)
                                 | Some(AgentCommand::FetchModelChoices { .. })
                                 | Some(AgentCommand::ConfigureModel { .. })
+                                | Some(AgentCommand::ShowGoal)
+                                | Some(AgentCommand::StartGoal { .. })
+                                | Some(AgentCommand::UpdateGoalStatus { .. })
+                                | Some(AgentCommand::Autonomous(_))
                                 | Some(AgentCommand::ShowTree)
                                 | Some(AgentCommand::CreateBranch(_))
                                 | Some(AgentCommand::SelectBranch { .. })
@@ -1009,6 +1123,34 @@ fn spawn_agent_host(
                     }
                 }
                 AgentCommand::ListSessions => send_session_list(&event_tx, &manager, &agent),
+                AgentCommand::ShowGoal => {
+                    let _ = event_tx.send(HostEvent::Notice(render_goal(&agent.goal())));
+                }
+                AgentCommand::StartGoal {
+                    objective,
+                    token_budget,
+                } => match agent.start_goal(objective, token_budget) {
+                    Ok(()) => {
+                        let _ = event_tx.send(session_updated(&agent));
+                        let _ = event_tx.send(HostEvent::Notice("Goal started.".to_string()));
+                    }
+                    Err(error) => send_host_error(
+                        &event_tx,
+                        &format!("Failed to start goal: {error}"),
+                    ),
+                },
+                AgentCommand::UpdateGoalStatus { status, reason } => {
+                    match agent.update_goal_status(status, reason) {
+                        Ok(()) => {
+                            let _ = event_tx.send(session_updated(&agent));
+                            let _ = event_tx.send(HostEvent::Notice(render_goal(&agent.goal())));
+                        }
+                        Err(error) => send_host_error(
+                            &event_tx,
+                            &format!("Failed to update goal: {error}"),
+                        ),
+                    }
+                }
                 AgentCommand::ShowTree => {
                     let _ = event_tx.send(HostEvent::Notice(render_session_tree(&agent.session_tree())));
                 }
@@ -1309,6 +1451,7 @@ fn switch_project(
             manager.clone(),
             model_store.clone(),
             catalog_store.clone(),
+            AutonomousConfig::from_environment(),
         );
         workers.insert(
             workspace.clone(),
@@ -1817,6 +1960,42 @@ fn render_session_tree(tree: &SessionTree) -> String {
         }
     }
     lines.join("\n")
+}
+
+fn render_goal(goal: &GoalState) -> String {
+    let Some(objective) = &goal.objective else {
+        return "No active goal.".to_string();
+    };
+    format!(
+        "Goal: {}\nStatus: {:?}\nUsage: {} tokens, {}s, {} continuations{}{}",
+        objective,
+        goal.status,
+        goal.tokens_used,
+        goal.time_used_seconds,
+        goal.continuations_used,
+        goal.token_budget
+            .map_or_else(String::new, |budget| format!(" / {budget}")),
+        goal.last_reason
+            .as_deref()
+            .map_or_else(String::new, |reason| format!("\nReason: {reason}"))
+    )
+}
+
+fn render_autonomous_report(report: &AutonomousReport) -> String {
+    format!(
+        "Autonomous run stopped: {:?}\nTurns: {}  continuations: {}  tokens: {}{}",
+        report.stop_reason,
+        report.status.turns_used,
+        report.status.continuations_used,
+        report.status.tokens_used,
+        report
+            .status
+            .last_gate_failure
+            .as_ref()
+            .map_or_else(String::new, |failure| {
+                format!("\nLast gate failure: {} ({})", failure.command, failure.exit)
+            })
+    )
 }
 
 #[cfg(test)]

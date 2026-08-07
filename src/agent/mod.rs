@@ -4,7 +4,12 @@ mod control;
 mod diagnostics;
 mod event;
 mod prompt;
+mod autonomous;
 
+pub use autonomous::{
+    AutonomousConfig, AutonomousReport, AutonomousStatus, AutonomousStopReason, QualityGateConfig,
+    QualityGateFailure,
+};
 pub use control::{ApprovalDecision, ApprovalPrompt, ApprovalRequest, TurnControl};
 pub use diagnostics::{AgentDiagnostics, TurnDiagnostics};
 pub use event::AgentEvent;
@@ -17,13 +22,15 @@ use std::{
 };
 use uuid::Uuid;
 
+use self::autonomous::{GateOutcome, GateRunner};
+
 use crate::{
     llm::{ChatMessage, ChatStreamResponse, LlmClient, LlmEvent, Usage},
     model::Model,
     session::{
         ActiveSkillRecord, AssistantRecord, CompactionRecord, RunId, RuntimeSnapshot, Session,
-        SessionSummary, SessionTree, ToolCallRecord, ToolResultRecord, Transcript, TurnFailure,
-        TurnId,
+        GoalState, GoalStatus, SessionSummary, SessionTree, ToolCallRecord, ToolResultRecord,
+        Transcript, TurnFailure, TurnId,
     },
     skills::{SkillInfo, SkillRegistry},
     tools::{ToolPolicy, ToolRegistry},
@@ -138,6 +145,18 @@ impl Agent {
         self.session.tree()
     }
 
+    pub fn goal(&self) -> GoalState {
+        self.session.goal()
+    }
+
+    pub fn start_goal(&mut self, objective: impl Into<String>, token_budget: Option<u64>) -> Result<()> {
+        self.session.start_goal(objective, token_budget)
+    }
+
+    pub fn update_goal_status(&mut self, status: GoalStatus, reason: Option<String>) -> Result<()> {
+        self.session.update_goal_status(status, reason)
+    }
+
     pub fn create_branch(&mut self, name: impl Into<String>) -> Result<Uuid> {
         let branch_id = self.session.create_branch(name, None)?;
         self.restart_runtime()?;
@@ -168,6 +187,112 @@ impl Agent {
 
     pub fn diagnostics(&self) -> AgentDiagnostics {
         self.diagnostics.clone()
+    }
+
+    pub async fn run_autonomous<F>(
+        &mut self,
+        input: impl Into<String>,
+        config: AutonomousConfig,
+        control: TurnControl,
+        mut emit: F,
+    ) -> Result<AutonomousReport>
+    where
+        F: FnMut(AgentEvent),
+    {
+        config.validate()?;
+        let started = Instant::now();
+        let mut gate_runner = GateRunner::new(self.config.workspace.clone(), config.gates.clone())?;
+        let mut status = AutonomousStatus {
+            turns_used: 0,
+            continuations_used: 0,
+            tokens_used: 0,
+            started_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            last_gate_failure: None,
+        };
+        let mut prompt = input.into();
+        ensure!(!prompt.trim().is_empty(), "autonomous input cannot be empty");
+
+        loop {
+            if status.turns_used >= config.max_turns {
+                return Ok(AutonomousReport {
+                    status,
+                    stop_reason: AutonomousStopReason::MaxTurns,
+                });
+            }
+            if status.tokens_used >= config.max_tokens {
+                return Ok(AutonomousReport {
+                    status,
+                    stop_reason: AutonomousStopReason::MaxTokens,
+                });
+            }
+            if started.elapsed() >= Duration::from_millis(config.timeout_ms) {
+                return Ok(AutonomousReport {
+                    status,
+                    stop_reason: AutonomousStopReason::Timeout,
+                });
+            }
+
+            let mut turn_tokens = 0_u64;
+            let autonomous_continuation = status.turns_used > 0;
+            let mut forward_event = |event| {
+                if let AgentEvent::DiagnosticsUpdated { diagnostics, .. } = &event {
+                    turn_tokens = diagnostics.usage.total_tokens;
+                }
+                emit(event);
+            };
+            self.turn_with_control_inner(
+                prompt.clone(),
+                &mut forward_event,
+                control.clone(),
+                autonomous_continuation,
+            )
+            .await?;
+            status.turns_used = status.turns_used.saturating_add(1);
+            status.tokens_used = status.tokens_used.saturating_add(turn_tokens);
+
+            if self.session.goal().status == crate::session::GoalStatus::BudgetLimited {
+                return Ok(AutonomousReport {
+                    status,
+                    stop_reason: AutonomousStopReason::MaxTokens,
+                });
+            }
+
+            if !config.gates.commands.is_empty() {
+                match gate_runner.run().await? {
+                    GateOutcome::Passed => {
+                        status.last_gate_failure = None;
+                        return Ok(AutonomousReport {
+                            status,
+                            stop_reason: AutonomousStopReason::GatesPassed,
+                        });
+                    }
+                    GateOutcome::Failed(failure) => {
+                        status.last_gate_failure = Some(failure.clone());
+                        prompt = format_gate_continuation(&config, &failure);
+                    }
+                    GateOutcome::RetriesExhausted(failure) => {
+                        status.last_gate_failure = Some(failure);
+                        return Ok(AutonomousReport {
+                            status,
+                            stop_reason: AutonomousStopReason::GateRetriesExhausted,
+                        });
+                    }
+                }
+            } else {
+                prompt = config.continuation_prompt.clone();
+            }
+
+            if status.continuations_used >= config.max_continuations {
+                return Ok(AutonomousReport {
+                    status,
+                    stop_reason: AutonomousStopReason::MaxContinuations,
+                });
+            }
+            status.continuations_used = status.continuations_used.saturating_add(1);
+        }
     }
 
     pub fn session_log_path(&self) -> Option<PathBuf> {
@@ -368,15 +493,34 @@ impl Agent {
     where
         F: FnMut(AgentEvent),
     {
+        self.turn_with_control_inner(input, &mut emit, control, false)
+            .await
+    }
+
+    async fn turn_with_control_inner<F>(
+        &mut self,
+        input: impl Into<String>,
+        emit: &mut F,
+        control: TurnControl,
+        autonomous_continuation: bool,
+    ) -> Result<()>
+    where
+        F: FnMut(AgentEvent),
+    {
         let turn_id = self.session.begin_turn(input.into())?;
         emit(AgentEvent::TurnStarted { turn_id });
         let started = Instant::now();
-        let result = self.run_turn(turn_id, &mut emit, &control).await;
+        let result = self.run_turn(turn_id, emit, &control).await;
         match result {
             Ok(mut diagnostics) => {
                 diagnostics.elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 self.diagnostics.record_turn(&diagnostics);
                 self.session.finish_turn(&turn_id)?;
+                self.session.record_goal_usage(
+                    diagnostics.usage.total_tokens,
+                    started.elapsed().as_secs(),
+                    autonomous_continuation,
+                )?;
                 emit(AgentEvent::DiagnosticsUpdated {
                     turn_id,
                     diagnostics,
@@ -430,6 +574,14 @@ impl Agent {
                 tool_call_id: None,
                 tool_calls: None,
             }];
+            let goal = self.session.goal();
+            if goal.is_active()
+                && let Some(objective) = goal.objective
+            {
+                request_messages[0].content.push_str(&format!(
+                    "\n\nActive goal:\n{objective}\nDo not treat one turn as completion. Continue making concrete progress and verify the objective before declaring it complete."
+                ));
+            }
             request_messages.extend(self.session.context().messages);
             let tool_definitions = if force_final_response {
                 request_messages[0].content.push_str("\n\n");
@@ -750,6 +902,22 @@ fn active_skill_prompts<'a>(
             Ok((info, body))
         })
         .collect()
+}
+
+fn format_gate_continuation(config: &AutonomousConfig, failure: &QualityGateFailure) -> String {
+    format!(
+        "Autonomous quality gate failed (attempt {}/{}): `{}` exited {}.\n\nOutput:\n{}\n\n{}",
+        failure.attempt,
+        config.gates.max_retries,
+        failure.command,
+        failure.exit,
+        if failure.output.is_empty() {
+            "(no output)"
+        } else {
+            &failure.output
+        },
+        config.continuation_prompt
+    )
 }
 
 async fn execute_tool(

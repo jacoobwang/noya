@@ -1,6 +1,6 @@
 use super::model::{
-    AssistantRecord, CompactionRecord, RunId, RuntimeSnapshot, SessionId, ToolCallRecord,
-    ToolResultRecord, TurnFailure, TurnId, UserMessageRecord,
+    AssistantRecord, CompactionRecord, GoalState, RunId, RuntimeSnapshot, SessionId,
+    ToolCallRecord, ToolResultRecord, TurnFailure, TurnId, UserMessageRecord,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -113,6 +113,9 @@ pub enum SessionEvent {
         from_seq: u64,
         summary: String,
         summary_model: String,
+    },
+    GoalChanged {
+        state: GoalState,
     },
     SessionArchived,
 }

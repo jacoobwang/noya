@@ -723,6 +723,21 @@ noya session branch-select <id> <branch-uuid> [--summary <text>]
 --workspace <path>
 --model <model>
 --model-id <id>
+
+自治运行使用显式边界和可选质量门禁：
+
+```text
+--autonomous <prompt>
+--autonomous-gate <command>       可重复传入
+--autonomous-max-continuations <n>
+--autonomous-max-turns <n>
+--autonomous-max-tokens <n>
+--autonomous-timeout-ms <ms>
+--autonomous-gate-retries <n>
+--autonomous-gate-timeout-ms <ms>
+```
+
+Quality gate 通过只表示该命令通过；达到 turn、token 或时间上限不表示目标完成。
 ```
 
 为了区分默认 workspace 和用户显式指定的 workspace，CLI 字段应从当前的默认 `PathBuf(".")` 改为 `Option<PathBuf>`，在命令语义层解析默认值。
@@ -745,6 +760,9 @@ SESSION       UPDATED              MODEL       TURNS  TITLE
 /rename <title>
 /retry
 /compact
+/goal <objective>
+/goal status|pause|resume|complete|clear
+/autonomous <prompt>
 /tree
 /branch <name>
 /branch select <branch-id-prefix> [summary]

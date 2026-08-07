@@ -194,6 +194,11 @@ noya session tree 019fbd63
 noya session branch-create 019fbd63 experiment
 noya session branch-select 019fbd63 <branch-uuid> --summary "handoff notes"
 noya session archive 019fbd63
+
+# Start a bounded autonomous run in the TUI
+noya --autonomous "Implement and verify the migration" \
+  --autonomous-gate "cargo test --lib" \
+  --autonomous-max-turns 12
 ```
 
 Session data is stored below `NOYA_DATA_DIR` when set, otherwise in `~/.noya/`. Each session has an append-only `events.jsonl`, derived `meta.json`, a transient streaming checkpoint, and an advisory lock. Session logs may contain source code, prompts, model reasoning, tool arguments, and command output; protect them as sensitive local data. API keys are never written to session files.
@@ -229,6 +234,8 @@ TUI commands:
 /new        Create and switch to a new session
 /model      Choose a logged-in model, or switch with /model <name>
 /sessions   List sessions for the current workspace
+/goal       Create or inspect a persistent goal
+/autonomous Run a bounded autonomous prompt
 /tree       Show the current session tree and named branches
 /branch N   Create branch N; use `/branch select ID [summary]` to switch
 /resume ID  Switch to a session matching an ID prefix

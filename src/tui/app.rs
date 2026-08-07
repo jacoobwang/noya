@@ -2,7 +2,7 @@ use crate::tui::command::{self, SlashCommand};
 use crate::{
     AgentDiagnostics, AgentEvent, ApprovalDecision, ApprovalRequest,
     model::{AuthenticationMode, Model, ProviderProtocol},
-    session::{SessionSummary, Transcript, TranscriptKind},
+    session::{GoalStatus, SessionSummary, Transcript, TranscriptKind},
 };
 use serde_json::Value;
 use std::{
@@ -134,6 +134,16 @@ pub enum TuiAction {
         authentication: AuthenticationMode,
     },
     ListSessions,
+    ShowGoal,
+    StartGoal {
+        objective: String,
+        token_budget: Option<u64>,
+    },
+    UpdateGoalStatus {
+        status: GoalStatus,
+        reason: Option<String>,
+    },
+    Autonomous(String),
     ShowTree,
     CreateBranch(String),
     SelectBranch {
@@ -721,7 +731,7 @@ impl App {
             "/help" => {
                 self.add_message(Message::new(
                     MessageKind::System,
-                    "Commands: /help /new /model [name] /skills /skill <name> /sessions /tree /branch <name> /branch select <id> [summary] /project [index|path] /resume <id> /rename <title> /retry /compact /clear /reset /status /cancel /quit",
+                    "Commands: /help /new /model [name] /skills /skill <name> /sessions /goal [status|pause|resume|complete|clear] /autonomous <prompt> /tree /branch <name> /branch select <id> [summary] /project [index|path] /resume <id> /rename <title> /retry /compact /clear /reset /status /cancel /quit",
                 ));
                 TuiAction::None
             }
@@ -794,6 +804,56 @@ impl App {
                 TuiAction::None
             }
             "/sessions" => TuiAction::ListSessions,
+            "/goal" | "/goal status" => TuiAction::ShowGoal,
+            "/goal pause" if self.agent_state == AgentState::Idle => TuiAction::UpdateGoalStatus {
+                status: GoalStatus::Paused,
+                reason: Some("paused by user".to_string()),
+            },
+            "/goal resume" if self.agent_state == AgentState::Idle => TuiAction::UpdateGoalStatus {
+                status: GoalStatus::Active,
+                reason: Some("resumed by user".to_string()),
+            },
+            "/goal complete" if self.agent_state == AgentState::Idle => TuiAction::UpdateGoalStatus {
+                status: GoalStatus::Complete,
+                reason: Some("marked complete by user".to_string()),
+            },
+            "/goal clear" if self.agent_state == AgentState::Idle => TuiAction::UpdateGoalStatus {
+                status: GoalStatus::Idle,
+                reason: None,
+            },
+            _ if input.starts_with("/goal ") && self.agent_state == AgentState::Idle => {
+                let argument = input[6..].trim();
+                let (token_budget, objective) = if let Some(rest) = argument.strip_prefix("--budget ") {
+                    let mut parts = rest.splitn(2, char::is_whitespace);
+                    let budget = parts.next().and_then(|value| value.parse::<u64>().ok());
+                    (budget, parts.next().unwrap_or_default().trim())
+                } else {
+                    (None, argument)
+                };
+                if objective.is_empty() {
+                    self.status_message = Some("Usage: /goal [--budget <tokens>] <objective>".to_string());
+                    TuiAction::None
+                } else {
+                    TuiAction::StartGoal {
+                        objective: objective.to_string(),
+                        token_budget,
+                    }
+                }
+            }
+            _ if input.starts_with("/autonomous ") && self.agent_state == AgentState::Idle => {
+                let prompt = input[12..].trim();
+                if prompt.is_empty() {
+                    self.status_message = Some("Usage: /autonomous <prompt>".to_string());
+                    TuiAction::None
+                } else {
+                    self.agent_state = AgentState::Thinking;
+                    TuiAction::Autonomous(prompt.to_string())
+                }
+            }
+            "/autonomous" => {
+                self.status_message = Some("Usage: /autonomous <prompt>".to_string());
+                TuiAction::None
+            }
             "/tree" => TuiAction::ShowTree,
             _ if input.starts_with("/branch ") && self.agent_state == AgentState::Idle => {
                 let argument = input[8..].trim();
@@ -862,7 +922,7 @@ impl App {
                 self.add_message(Message::new(
                     MessageKind::System,
                     format!(
-                        "Session: {}\nTitle: {}\nLog: {}\nWorkspace: {}\nModel: {}\nModel ID: {}\nCompleted turns: {}\nContext epoch: {}\nEstimated context tokens: {}\nUsage: {} input / {} output / {} total tokens{}\nTool calls: {} ({} succeeded, {} failed)\nRuntime: {} ms total / {} ms in tools\nEstimated cost: {}\nCompaction cutoff: {}\nState: {:?}",
+                        "Session: {}\nTitle: {}\nLog: {}\nWorkspace: {}\nModel: {}\nModel ID: {}\nCompleted turns: {}\nContext epoch: {}\nEstimated context tokens: {}\nUsage: {} input / {} output / {} total tokens{}\nTool calls: {} ({} succeeded, {} failed)\nRuntime: {} ms total / {} ms in tools\nEstimated cost: {}\nCompaction cutoff: {}\nGoal: {}\nState: {:?}",
                         session.map(|value| value.session_id.to_string()).unwrap_or_else(|| "ephemeral".to_string()),
                         session.map(|value| value.title.as_str()).unwrap_or("New session"),
                         self.session_log_path.as_ref().map_or_else(|| "ephemeral".to_string(), |path| path.display().to_string()),
@@ -885,6 +945,7 @@ impl App {
                             .estimated_cost_usd
                             .map_or_else(|| "not configured".to_string(), |cost| format!("${cost:.6}")),
                         session.and_then(|value| value.compaction_through_seq).map_or_else(|| "none".to_string(), |seq| seq.to_string()),
+                        session.map_or_else(|| "idle".to_string(), |value| format!("{:?}", value.goal.status)),
                         self.agent_state
                     ),
                 ));
@@ -1323,6 +1384,32 @@ mod tests {
             app.handle_submission("/tree".to_string()),
             TuiAction::ShowTree
         );
+        assert_eq!(
+            app.handle_submission("/goal Ship the migration".to_string()),
+            TuiAction::StartGoal {
+                objective: "Ship the migration".to_string(),
+                token_budget: None,
+            }
+        );
+        assert_eq!(
+            app.handle_submission("/goal --budget 2000 Verify the result".to_string()),
+            TuiAction::StartGoal {
+                objective: "Verify the result".to_string(),
+                token_budget: Some(2000),
+            }
+        );
+        assert_eq!(
+            app.handle_submission("/goal pause".to_string()),
+            TuiAction::UpdateGoalStatus {
+                status: GoalStatus::Paused,
+                reason: Some("paused by user".to_string()),
+            }
+        );
+        assert_eq!(
+            app.handle_submission("/autonomous finish the migration".to_string()),
+            TuiAction::Autonomous("finish the migration".to_string())
+        );
+        app.agent_state = AgentState::Idle;
         assert_eq!(
             app.handle_submission("/branch experiment".to_string()),
             TuiAction::CreateBranch("experiment".to_string())
