@@ -1,6 +1,6 @@
 use super::protocol::{
     AssistantMessage, CalledFunction, ChatMessage, ChatResponse, ChatStreamResponse, Choice,
-    LlmEvent, ToolCall, ToolDefinition,
+    LlmEvent, ToolCall, ToolDefinition, Usage,
 };
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -113,6 +113,8 @@ fn tool(definition: &ToolDefinition) -> Tool {
 #[derive(Debug, Deserialize)]
 struct Response {
     content: Vec<ContentBlock>,
+    #[serde(default)]
+    usage: Option<Usage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,6 +154,7 @@ pub(super) fn response(body: &str) -> Result<ChatResponse> {
                 tool_calls,
             },
         }],
+        usage: response.usage.map(Usage::normalized),
     })
 }
 
@@ -167,6 +170,7 @@ pub(super) struct StreamAccumulator {
     content: String,
     reasoning_content: String,
     tool_calls: BTreeMap<usize, ToolCallBuilder>,
+    usage: Option<Usage>,
 }
 
 impl StreamAccumulator {
@@ -175,6 +179,14 @@ impl StreamAccumulator {
         F: FnMut(LlmEvent),
     {
         let event: Value = serde_json::from_str(data).context("decode Anthropic SSE event")?;
+        if let Some(usage) = event
+            .get("message")
+            .and_then(|message| message.get("usage"))
+            .or_else(|| event.get("usage"))
+            .and_then(|usage| serde_json::from_value::<Usage>(usage.clone()).ok())
+        {
+            self.usage = Some(usage.normalized());
+        }
         match event.get("type").and_then(Value::as_str) {
             Some("content_block_start") => {
                 let index = event
@@ -257,6 +269,7 @@ impl StreamAccumulator {
             content: self.content,
             reasoning_content: (!self.reasoning_content.is_empty()).then_some(self.reasoning_content),
             tool_calls,
+            usage: self.usage,
         })
     }
 }
@@ -275,6 +288,7 @@ pub(super) fn stream_response(response: ChatResponse, emit: &mut impl FnMut(LlmE
         content,
         reasoning_content: choice.message.reasoning_content,
         tool_calls: choice.message.tool_calls,
+        usage: response.usage,
     })
 }
 

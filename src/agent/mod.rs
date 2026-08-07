@@ -1,10 +1,12 @@
 //! Agent runtime: turn orchestration behind a small event-driven interface.
 
 mod control;
+mod diagnostics;
 mod event;
 mod prompt;
 
 pub use control::{ApprovalDecision, ApprovalPrompt, ApprovalRequest, TurnControl};
+pub use diagnostics::{AgentDiagnostics, TurnDiagnostics};
 pub use event::AgentEvent;
 
 use anyhow::{Context, Result, ensure};
@@ -16,14 +18,14 @@ use std::{
 use uuid::Uuid;
 
 use crate::{
-    llm::{ChatMessage, LlmClient, LlmEvent},
+    llm::{ChatMessage, ChatStreamResponse, LlmClient, LlmEvent, Usage},
     model::Model,
     session::{
         ActiveSkillRecord, AssistantRecord, CompactionRecord, RunId, RuntimeSnapshot, Session,
         SessionSummary, ToolCallRecord, ToolResultRecord, Transcript, TurnFailure, TurnId,
     },
     skills::{SkillInfo, SkillRegistry},
-    tools::ToolRegistry,
+    tools::{ToolPolicy, ToolRegistry},
 };
 
 const FINAL_RESPONSE_INSTRUCTION: &str = "The tool-call limit has been reached. Do not call any more tools. Use the information already available in the conversation to give the user the best possible final answer, and clearly state anything that could not be verified.";
@@ -36,6 +38,7 @@ pub struct AgentConfig {
     pub tool_timeout: Duration,
     pub max_tool_output_bytes: usize,
     pub temperature: f32,
+    pub tool_policy: ToolPolicy,
 }
 
 pub struct Agent {
@@ -46,6 +49,7 @@ pub struct Agent {
     session: Session,
     system_prompt: String,
     run_id: RunId,
+    diagnostics: AgentDiagnostics,
 }
 
 impl Agent {
@@ -101,7 +105,8 @@ impl Agent {
         }
         let active = active_skill_prompts(&skills, &session.active_skills())?;
         let system = prompt::build(&config.workspace, &active)?;
-        let tools = ToolRegistry::coding_defaults(config.workspace.clone());
+        let tools = ToolRegistry::coding_defaults(config.workspace.clone())
+            .with_policy(config.tool_policy.clone());
         let active_records = session.active_skills();
         let run_id = start_runtime(
             &mut session,
@@ -120,6 +125,7 @@ impl Agent {
             session,
             system_prompt: system,
             run_id,
+            diagnostics: AgentDiagnostics::default(),
         })
     }
 
@@ -133,6 +139,10 @@ impl Agent {
 
     pub fn context_token_estimate(&self) -> usize {
         self.session.context().estimated_tokens
+    }
+
+    pub fn diagnostics(&self) -> AgentDiagnostics {
+        self.diagnostics.clone()
     }
 
     pub fn session_log_path(&self) -> Option<PathBuf> {
@@ -335,15 +345,26 @@ impl Agent {
     {
         let turn_id = self.session.begin_turn(input.into())?;
         emit(AgentEvent::TurnStarted { turn_id });
+        let started = Instant::now();
         let result = self.run_turn(turn_id, &mut emit, &control).await;
         match result {
-            Ok(()) => {
+            Ok(mut diagnostics) => {
+                diagnostics.elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                self.diagnostics.record_turn(&diagnostics);
                 self.session.finish_turn(&turn_id)?;
+                emit(AgentEvent::DiagnosticsUpdated {
+                    turn_id,
+                    diagnostics,
+                });
                 emit(AgentEvent::TurnCompleted { turn_id });
                 Ok(())
             }
             Err(error) => {
                 let message = error.to_string();
+                self.diagnostics.record_failure(
+                    started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                    message.clone(),
+                );
                 if control.is_cancelled() {
                     self.session
                         .cancel_turn(&turn_id, message.clone())
@@ -369,11 +390,12 @@ impl Agent {
         turn_id: TurnId,
         emit: &mut F,
         control: &TurnControl,
-    ) -> Result<()>
+    ) -> Result<TurnDiagnostics>
     where
         F: FnMut(AgentEvent),
     {
         let mut tool_loops = 0;
+        let mut diagnostics = TurnDiagnostics::default();
         loop {
             let force_final_response = tool_loops >= self.config.max_tool_loops;
             let mut request_messages = vec![ChatMessage {
@@ -400,7 +422,7 @@ impl Agent {
             let session = &mut self.session;
             let response = tokio::select! {
                 response = self.llm.complete_stream(
-                    request_messages,
+                    request_messages.clone(),
                     tool_definitions,
                     self.config.temperature,
                     |event| match event {
@@ -431,6 +453,11 @@ impl Agent {
                 ) => response?,
                 _ = control.cancellation.cancelled() => anyhow::bail!("turn cancelled"),
             };
+            let usage = response
+                .usage
+                .map(|usage| (usage, false))
+                .unwrap_or_else(|| (estimate_usage(&request_messages, &response), true));
+            diagnostics.add_usage(usage.0, usage.1, self.llm.cost_rates());
             if !streamed_content.is_empty()
                 && let Err(error) =
                     session.checkpoint_draft(run_id, turn_id, message_id, &streamed_content, true)
@@ -466,7 +493,7 @@ impl Agent {
                     chunk: String::new(),
                     is_final: true,
                 });
-                return Ok(());
+                return Ok(diagnostics);
             }
             let has_tool_calls = !response.tool_calls.is_empty();
             self.session.record_assistant(AssistantRecord {
@@ -482,12 +509,46 @@ impl Agent {
                 is_final: true,
             });
             if !has_tool_calls {
-                return Ok(());
+                return Ok(diagnostics);
             }
             tool_loops += 1;
             for call in response.tool_calls {
+                diagnostics.tool_calls = diagnostics.tool_calls.saturating_add(1);
                 let mut args: Value = serde_json::from_str(&call.function.arguments)
                     .context("decode tool arguments")?;
+                if self.tools.is_blocked(&call.function.name) {
+                    let result = serde_json::json!({
+                        "error": format!("tool blocked by policy: {}", call.function.name),
+                    });
+                    diagnostics.failed_tool_calls = diagnostics.failed_tool_calls.saturating_add(1);
+                    let blocked_args = args.clone();
+                    self.session.record_tool_started(ToolCallRecord {
+                        call_id: call.id.clone(),
+                        name: call.function.name.clone(),
+                        arguments: args,
+                    })?;
+                    emit(AgentEvent::ToolStarted {
+                        turn_id,
+                        call_id: call.id.clone(),
+                        name: call.function.name.clone(),
+                        arguments: blocked_args,
+                    });
+                    self.session.record_tool_finished(ToolResultRecord {
+                        call_id: call.id.clone(),
+                        name: call.function.name.clone(),
+                        result: result.clone(),
+                        success: false,
+                        duration_ms: 0,
+                    })?;
+                    emit(AgentEvent::ToolFinished {
+                        turn_id,
+                        call_id: call.id.clone(),
+                        name: call.function.name.clone(),
+                        result,
+                        success: false,
+                    });
+                    continue;
+                }
                 if self
                     .tools
                     .requires_approval(&call.function.name)
@@ -512,6 +573,7 @@ impl Agent {
                         ApprovalDecision::Reject => {
                             let result =
                                 serde_json::json!({"error": "tool execution rejected by user"});
+                            diagnostics.failed_tool_calls = diagnostics.failed_tool_calls.saturating_add(1);
                             self.session.record_tool_started(ToolCallRecord {
                                 call_id: call.id.clone(),
                                 name: call.function.name.clone(),
@@ -557,12 +619,19 @@ impl Agent {
                     ) => result,
                         _ = control.cancellation.cancelled() => anyhow::bail!("turn cancelled"),
                 };
+                let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                diagnostics.tool_duration_ms = diagnostics.tool_duration_ms.saturating_add(duration_ms);
+                if success {
+                    diagnostics.successful_tool_calls = diagnostics.successful_tool_calls.saturating_add(1);
+                } else {
+                    diagnostics.failed_tool_calls = diagnostics.failed_tool_calls.saturating_add(1);
+                }
                 self.session.record_tool_finished(ToolResultRecord {
                     call_id: call.id.clone(),
                     name: call.function.name.clone(),
                     result: result.clone(),
                     success,
-                    duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                    duration_ms,
                 })?;
                 emit(AgentEvent::ToolFinished {
                     turn_id,
@@ -625,6 +694,8 @@ fn start_runtime(
         tool_timeout_ms: config.tool_timeout.as_millis().min(u64::MAX as u128) as u64,
         max_tool_output_bytes: config.max_tool_output_bytes,
         temperature: Some(config.temperature),
+        tool_approval_mode: config.tool_policy.approval_mode.as_str().to_string(),
+        blocked_tools: config.tool_policy.blocked_tools.iter().cloned().collect(),
         active_skills: active_skills.to_vec(),
     })
 }
@@ -708,6 +779,37 @@ fn limit_tool_result(result: Value, max_bytes: usize) -> Value {
     }
 }
 
+fn estimate_usage(messages: &[ChatMessage], response: &ChatStreamResponse) -> Usage {
+    let input_bytes = messages
+        .iter()
+        .map(|message| {
+            message.content.len()
+                + message
+                    .reasoning_content
+                    .as_ref()
+                    .map_or(0, String::len)
+                + message
+                    .tool_calls
+                    .as_ref()
+                    .map_or(0, |calls| serde_json::to_vec(calls).map_or(0, |value| value.len()))
+        })
+        .sum::<usize>();
+    let output_bytes = response.content.len()
+        + response
+            .reasoning_content
+            .as_ref()
+            .map_or(0, String::len)
+        + serde_json::to_vec(&response.tool_calls).map_or(0, |value| value.len());
+    let input_tokens = (input_bytes / 4).max(1) as u64;
+    let output_tokens = (output_bytes / 4).max(1) as u64;
+    Usage {
+        input_tokens,
+        output_tokens,
+        total_tokens: input_tokens.saturating_add(output_tokens),
+        ..Usage::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -728,6 +830,7 @@ mod tests {
             tool_timeout: Duration::from_secs(120),
             max_tool_output_bytes: 32_768,
             temperature: 0.2,
+            tool_policy: ToolPolicy::default(),
         };
         assert_eq!(c.workspace, PathBuf::from("repo"));
     }
@@ -752,6 +855,7 @@ mod tests {
                 tool_timeout: Duration::from_secs(120),
                 max_tool_output_bytes: 32_768,
                 temperature: 0.2,
+                tool_policy: ToolPolicy::default(),
             },
             LlmClient::new("https://deepseek.example", "secret", "deepseek-v4-flash"),
             session,
@@ -918,6 +1022,7 @@ mod tests {
                 tool_timeout: Duration::from_secs(120),
                 max_tool_output_bytes: 32_768,
                 temperature: 0.2,
+                tool_policy: ToolPolicy::default(),
             },
             llm,
         )
@@ -929,7 +1034,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(events.len(), 5);
+        assert_eq!(events.len(), 6);
         let turn_id = match events[0] {
             AgentEvent::TurnStarted { turn_id } => turn_id,
             ref event => panic!("unexpected event: {event:?}"),
@@ -967,6 +1072,10 @@ mod tests {
         ));
         assert!(matches!(
             events[4],
+            AgentEvent::DiagnosticsUpdated { turn_id: updated, .. } if updated == turn_id
+        ));
+        assert!(matches!(
+            events[5],
             AgentEvent::TurnCompleted { turn_id: completed } if completed == turn_id
         ));
     }
@@ -1000,6 +1109,10 @@ mod tests {
                 tool_timeout: Duration::from_secs(120),
                 max_tool_output_bytes: 32_768,
                 temperature: 0.2,
+                tool_policy: ToolPolicy {
+                    approval_mode: crate::tools::ToolApprovalMode::Never,
+                    ..ToolPolicy::default()
+                },
             },
             llm,
         )
@@ -1064,6 +1177,7 @@ mod tests {
                 tool_timeout: Duration::from_secs(120),
                 max_tool_output_bytes: 32_768,
                 temperature: 0.2,
+                tool_policy: ToolPolicy::default(),
             },
             llm,
             session,
@@ -1117,6 +1231,7 @@ mod tests {
                 tool_timeout: Duration::from_secs(120),
                 max_tool_output_bytes: 32_768,
                 temperature: 0.2,
+                tool_policy: ToolPolicy::default(),
             },
             llm,
         )
@@ -1173,6 +1288,7 @@ mod tests {
                 tool_timeout: Duration::from_secs(120),
                 max_tool_output_bytes: 32_768,
                 temperature: 0.2,
+                tool_policy: ToolPolicy::default(),
             },
             llm,
         )
@@ -1223,6 +1339,7 @@ mod tests {
                 tool_timeout: Duration::from_secs(120),
                 max_tool_output_bytes: 32_768,
                 temperature: 0.2,
+                tool_policy: ToolPolicy::default(),
             },
             llm,
         )
@@ -1307,6 +1424,7 @@ mod tests {
                 tool_timeout: Duration::from_secs(120),
                 max_tool_output_bytes: 32_768,
                 temperature: 0.2,
+                tool_policy: ToolPolicy::default(),
             },
             llm,
         )

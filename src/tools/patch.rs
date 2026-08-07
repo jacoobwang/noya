@@ -18,6 +18,10 @@ impl Tool for ApplyPatch {
         "Validate and apply one or more exact, unambiguous text replacements to an existing UTF-8 file in one write"
     }
 
+    fn risk(&self) -> super::ToolRisk {
+        super::ToolRisk::Mutating
+    }
+
     fn parameters(&self) -> Value {
         json!({
             "type": "object",

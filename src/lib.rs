@@ -13,8 +13,12 @@ pub mod tools;
 pub mod tui;
 
 pub use agent::{
-    Agent, AgentConfig, AgentEvent, ApprovalDecision, ApprovalPrompt, ApprovalRequest, TurnControl,
+    Agent, AgentConfig, AgentDiagnostics, AgentEvent, ApprovalDecision, ApprovalPrompt,
+    ApprovalRequest, TurnControl, TurnDiagnostics,
 };
-pub use llm::{ChatMessage, ChatRequest, ChatResponse, ChatStreamResponse, LlmClient, LlmEvent};
-pub use tools::{Tool, ToolRegistry};
+pub use llm::{
+    ChatMessage, ChatRequest, ChatResponse, ChatStreamResponse, CostRates, LlmClient, LlmEvent,
+    Usage,
+};
+pub use tools::{Tool, ToolApprovalMode, ToolPolicy, ToolRegistry, ToolRisk};
 pub use skills::{SkillInfo, SkillRegistry, SkillSource};

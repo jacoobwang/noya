@@ -2,6 +2,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::session::TurnId;
+use super::diagnostics::TurnDiagnostics;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
@@ -26,6 +27,10 @@ pub enum AgentEvent {
         name: String,
         result: Value,
         success: bool,
+    },
+    DiagnosticsUpdated {
+        turn_id: TurnId,
+        diagnostics: TurnDiagnostics,
     },
     ApprovalRequired {
         turn_id: TurnId,

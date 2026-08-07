@@ -213,6 +213,10 @@ Command-line overrides take precedence over model defaults and saved credentials
 
 Each tool call has a 120-second timeout by default, and serialized tool results are limited to 32 KiB before entering the model context. Override these limits with `--tool-timeout-seconds` and `--max-tool-output-bytes`.
 
+Mutating tools require approval by default. `--tool-approval never|mutating|always` (or `NOYA_TOOL_APPROVAL`) controls the policy; `--blocked-tools` (or `NOYA_BLOCKED_TOOLS`, comma-separated) prevents selected tools from executing. The default `mutating` policy requires approval for `apply_patch`, `write_file`, and `run_command`.
+
+`/status` reports cumulative tool calls, elapsed time, and provider usage when available. If the provider does not return usage, Noya shows a clearly marked character-based estimate. Set `NOYA_INPUT_COST_PER_MILLION_USD` and `NOYA_OUTPUT_COST_PER_MILLION_USD` to enable estimated cost reporting.
+
 Noya automatically compacts context at 75% of a known model context window and always preserves at least the four latest completed turns. Set `NOYA_AUTO_COMPACT=false` to disable automatic compaction; `/compact` remains available.
 
 TUI commands:
@@ -233,7 +237,7 @@ TUI commands:
 /quit       Exit
 ```
 
-`Ctrl+C` cancels an active turn and exits when idle. `Ctrl+D` always exits. All nine built-in tools execute without confirmation:
+`Ctrl+C` cancels an active turn and exits when idle. `Ctrl+D` always exits. Read-only tools run directly; mutating tools follow the approval policy:
 
 ```text
 read_file    Read a whole UTF-8 file or an offset/limit line range
@@ -253,10 +257,10 @@ run_command  Run a non-interactive shell command in the workspace
 
 Included: runtime turn loop, tool-loop guard, workspace-first prompt, LLM model adapter, event streaming, durable local sessions, crash recovery, resume/export/archive/fork, reset, retry, and context compaction.
 
-Not included: cloud synchronization, multi-user session sharing, multiple writers for one session, exactly-once recovery of tool side effects, transport-event replay, or automatic secret redaction.
+Not included: cloud synchronization, multi-user session sharing, multiple writers for one session, exactly-once recovery of tool side effects, transport-event replay, or automatic secret redaction. Cost rates are opt-in and configured globally rather than maintained in a model catalog.
 
 Suggested next steps:
 
-1. Add a sandbox adapter for `run_command` and optional policies for future high-risk tools.
+1. Add a sandbox adapter for `run_command` and per-workspace policy files.
 2. Add an HTTP/SSE host while keeping durable session replay separate from transport replay.
 3. Add opt-in secret redaction and remote backup adapters without changing the local JSONL source of truth.

@@ -108,6 +108,10 @@ pub struct RuntimeSnapshot {
     pub max_tool_output_bytes: usize,
     pub temperature: Option<f32>,
     #[serde(default)]
+    pub tool_approval_mode: String,
+    #[serde(default)]
+    pub blocked_tools: Vec<String>,
+    #[serde(default)]
     pub active_skills: Vec<ActiveSkillRecord>,
 }
 

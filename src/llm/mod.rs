@@ -7,8 +7,29 @@ mod stream;
 
 pub use protocol::{
     AssistantMessage, CalledFunction, ChatMessage, ChatRequest, ChatResponse, ChatStreamResponse,
-    Choice, FunctionDefinition, LlmEvent, ToolCall, ToolDefinition,
+    Choice, FunctionDefinition, LlmEvent, ToolCall, ToolDefinition, Usage,
 };
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CostRates {
+    pub input_per_million_usd: Option<f64>,
+    pub output_per_million_usd: Option<f64>,
+}
+
+impl CostRates {
+    pub fn from_env() -> Self {
+        Self {
+            input_per_million_usd: env_f64("NOYA_INPUT_COST_PER_MILLION_USD"),
+            output_per_million_usd: env_f64("NOYA_OUTPUT_COST_PER_MILLION_USD"),
+        }
+    }
+
+    pub fn estimate(self, usage: Usage) -> Option<f64> {
+        let input = self.input_per_million_usd? * usage.input_tokens as f64 / 1_000_000.0;
+        let output = self.output_per_million_usd? * usage.output_tokens as f64 / 1_000_000.0;
+        Some(input + output)
+    }
+}
 
 use anyhow::{Context, Result, bail};
 use crate::model::{AuthenticationMode, ProviderProtocol};
@@ -26,6 +47,7 @@ pub struct LlmClient {
     send_temperature: bool,
     protocol: ProviderProtocol,
     authentication: AuthenticationMode,
+    cost_rates: CostRates,
 }
 
 impl LlmClient {
@@ -69,6 +91,7 @@ impl LlmClient {
             send_temperature: true,
             protocol,
             authentication,
+            cost_rates: CostRates::from_env(),
         }
     }
 
@@ -79,6 +102,15 @@ impl LlmClient {
 
     pub fn model_id(&self) -> &str {
         &self.model
+    }
+
+    pub fn cost_rates(&self) -> CostRates {
+        self.cost_rates
+    }
+
+    pub fn with_cost_rates(mut self, cost_rates: CostRates) -> Self {
+        self.cost_rates = cost_rates;
+        self
     }
 
     pub async fn list_models(&self) -> Result<Vec<String>> {
@@ -397,6 +429,13 @@ impl LlmClient {
     }
 }
 
+fn env_f64(name: &str) -> Option<f64> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+}
+
 #[derive(Debug, Deserialize)]
 struct ModelListResponse {
     data: Vec<ModelListItem>,
@@ -424,6 +463,7 @@ where
         content,
         reasoning_content: choice.message.reasoning_content,
         tool_calls: choice.message.tool_calls,
+        usage: response.usage,
     })
 }
 

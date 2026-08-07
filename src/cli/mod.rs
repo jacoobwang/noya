@@ -7,6 +7,7 @@ use noya::{
         ProviderProtocol, RuntimeModelConfig,
     },
     session::{CreateSession, ExportFormat, SessionFilter, SessionManager, SessionSummary},
+    tools::{ToolApprovalMode, ToolPolicy},
     tui,
 };
 use std::{
@@ -56,6 +57,14 @@ pub struct Cli {
     /// Maximum number of project Workers kept alive in this process.
     #[arg(long, env = "NOYA_MAX_WORKERS", default_value_t = 4)]
     max_workers: usize,
+
+    /// Tool approval policy: never, mutating, or always.
+    #[arg(long, env = "NOYA_TOOL_APPROVAL", value_enum, default_value_t = ToolApprovalMode::Mutating)]
+    tool_approval: ToolApprovalMode,
+
+    /// Comma-separated tool names that must never execute.
+    #[arg(long, env = "NOYA_BLOCKED_TOOLS", value_delimiter = ',')]
+    blocked_tools: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -446,6 +455,11 @@ async fn run_tui(
             tool_timeout: std::time::Duration::from_secs(cli.tool_timeout_seconds),
             max_tool_output_bytes: cli.max_tool_output_bytes,
             temperature: 0.2,
+            tool_policy: ToolPolicy {
+                approval_mode: cli.tool_approval,
+                ..ToolPolicy::default()
+            }
+            .with_blocked_tools(cli.blocked_tools.clone()),
         },
         LlmClient::with_settings(
             reqwest::Client::new(),
@@ -674,7 +688,20 @@ mod tests {
         assert_eq!(run.max_tool_loops, 50);
         assert_eq!(run.tool_timeout_seconds, 120);
         assert_eq!(run.max_tool_output_bytes, 32_768);
+        assert_eq!(run.tool_approval, ToolApprovalMode::Mutating);
+        assert!(run.blocked_tools.is_empty());
         assert!(run.command.is_none());
+
+        let restricted = Cli::try_parse_from([
+            "noya",
+            "--tool-approval",
+            "always",
+            "--blocked-tools",
+            "run_command,write_file",
+        ])
+        .unwrap();
+        assert_eq!(restricted.tool_approval, ToolApprovalMode::Always);
+        assert_eq!(restricted.blocked_tools, ["run_command", "write_file"]);
     }
 
     #[test]

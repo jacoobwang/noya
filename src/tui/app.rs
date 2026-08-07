@@ -1,6 +1,6 @@
 use crate::tui::command::{self, SlashCommand};
 use crate::{
-    AgentEvent, ApprovalDecision, ApprovalRequest,
+    AgentDiagnostics, AgentEvent, ApprovalDecision, ApprovalRequest,
     model::{AuthenticationMode, Model, ProviderProtocol},
     session::{SessionSummary, Transcript, TranscriptKind},
 };
@@ -163,6 +163,7 @@ pub struct App {
     pub session: Option<SessionSummary>,
     pub session_log_path: Option<PathBuf>,
     pub context_tokens: usize,
+    pub diagnostics: AgentDiagnostics,
     turn_started_at: Option<Instant>,
     turn_output_chars: usize,
     command_menu_dismissed: bool,
@@ -189,6 +190,7 @@ impl App {
             session: None,
             session_log_path: None,
             context_tokens: 0,
+            diagnostics: AgentDiagnostics::default(),
             turn_started_at: None,
             turn_output_chars: 0,
             command_menu_dismissed: false,
@@ -320,6 +322,9 @@ impl App {
                     self.add_message(message);
                 }
                 self.agent_state = AgentState::Thinking;
+            }
+            AgentEvent::DiagnosticsUpdated { diagnostics, .. } => {
+                self.diagnostics.record_turn(&diagnostics);
             }
             AgentEvent::ApprovalRequired {
                 request_id,
@@ -824,7 +829,7 @@ impl App {
                 self.add_message(Message::new(
                     MessageKind::System,
                     format!(
-                        "Session: {}\nTitle: {}\nLog: {}\nWorkspace: {}\nModel: {}\nModel ID: {}\nCompleted turns: {}\nContext epoch: {}\nEstimated context tokens: {}\nCompaction cutoff: {}\nState: {:?}",
+                        "Session: {}\nTitle: {}\nLog: {}\nWorkspace: {}\nModel: {}\nModel ID: {}\nCompleted turns: {}\nContext epoch: {}\nEstimated context tokens: {}\nUsage: {} input / {} output / {} total tokens{}\nTool calls: {} ({} succeeded, {} failed)\nRuntime: {} ms total / {} ms in tools\nEstimated cost: {}\nCompaction cutoff: {}\nState: {:?}",
                         session.map(|value| value.session_id.to_string()).unwrap_or_else(|| "ephemeral".to_string()),
                         session.map(|value| value.title.as_str()).unwrap_or("New session"),
                         self.session_log_path.as_ref().map_or_else(|| "ephemeral".to_string(), |path| path.display().to_string()),
@@ -834,6 +839,18 @@ impl App {
                         session.map_or(0, |value| value.completed_turns),
                         session.map_or(0, |value| value.context_epoch),
                         self.context_tokens,
+                        self.diagnostics.usage.input_tokens,
+                        self.diagnostics.usage.output_tokens,
+                        self.diagnostics.usage.total_tokens,
+                        if self.diagnostics.usage_estimated { " (estimated)" } else { "" },
+                        self.diagnostics.tool_calls,
+                        self.diagnostics.successful_tool_calls,
+                        self.diagnostics.failed_tool_calls,
+                        self.diagnostics.total_duration_ms,
+                        self.diagnostics.tool_duration_ms,
+                        self.diagnostics
+                            .estimated_cost_usd
+                            .map_or_else(|| "not configured".to_string(), |cost| format!("${cost:.6}")),
                         session.and_then(|value| value.compaction_through_seq).map_or_else(|| "none".to_string(), |seq| seq.to_string()),
                         self.agent_state
                     ),

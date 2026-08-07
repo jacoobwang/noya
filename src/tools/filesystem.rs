@@ -71,6 +71,9 @@ impl Tool for WriteFile {
     fn description(&self) -> &str {
         "Write or replace a UTF-8 file in the workspace"
     }
+    fn risk(&self) -> super::ToolRisk {
+        super::ToolRisk::Mutating
+    }
     fn parameters(&self) -> Value {
         json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false})
     }

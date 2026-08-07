@@ -196,6 +196,10 @@ noya --model qwen \
 
 每个 tool call 默认最多执行 120 秒，进入模型上下文的序列化 tool result 默认限制为 32 KiB。可以使用 `--tool-timeout-seconds` 和 `--max-tool-output-bytes` 覆盖。
 
+默认情况下，变更类 tool 需要用户确认。可以使用 `--tool-approval never|mutating|always` 或 `NOYA_TOOL_APPROVAL` 设置策略；使用 `--blocked-tools` 或逗号分隔的 `NOYA_BLOCKED_TOOLS` 可以阻止指定 tool 执行。默认 `mutating` 策略会要求确认 `apply_patch`、`write_file` 和 `run_command`。
+
+`/status` 会显示累计 tool 调用数、耗时以及 provider 返回的 usage。如果 provider 没有返回 usage，Noya 会显示带有 estimated 标记的字符数估算。设置 `NOYA_INPUT_COST_PER_MILLION_USD` 和 `NOYA_OUTPUT_COST_PER_MILLION_USD` 后可以显示估算费用。
+
 当上下文达到已知 model context window 的 75% 时，Noya 会自动压缩，并始终保留最近至少 4 个 completed turn。设置 `NOYA_AUTO_COMPACT=false` 可以关闭自动压缩，手动 `/compact` 仍然可用。
 
 常用命令：
@@ -216,7 +220,7 @@ noya --model qwen \
 /quit       退出
 ```
 
-`Ctrl+C` 在 Agent 运行时取消当前 turn，空闲时退出；`Ctrl+D` 始终退出。当前 8 个内置 tool 均直接执行，不要求用户确认：
+`Ctrl+C` 在 Agent 运行时取消当前 turn，空闲时退出；`Ctrl+D` 始终退出。只读 tool 直接执行，变更类 tool 按审批策略执行：
 
 ```text
 read_file    读取完整 UTF-8 文件或 offset/limit 行范围
@@ -233,11 +237,11 @@ run_command  在 workspace 中执行非交互 shell 命令
 
 包含：runtime turn loop、tool loop guard、workspace-first prompt、LLM model adapter、事件流、本地持久 session、崩溃恢复、resume/export/archive/fork、reset、retry 和 context compaction。
 
-暂不包含：云同步、多用户共享 session、单 session 多 writer、tool 外部副作用的 exactly-once 恢复、transport event replay 和自动 secret redaction。
+暂不包含：云同步、多用户共享 session、单 session 多 writer、tool 外部副作用的 exactly-once 恢复、transport event replay 和自动 secret redaction。费用单价目前是可选的全局配置，不会写入 model catalog。
 
 下一阶段建议按此顺序演进：
 
-1. 为 `run_command` 增加 sandbox adapter，并为未来的高风险 tool 提供可选 policy。
+1. 为 `run_command` 增加 sandbox adapter，并增加 workspace 级 policy 文件。
 2. 增加 HTTP/SSE host，并严格区分 durable session replay 与 transport replay。
 3. 增加 opt-in secret redaction 和远程备份 adapter，同时保留本地 JSONL 事实来源。
 

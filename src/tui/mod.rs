@@ -1102,7 +1102,8 @@ fn drain_worker_events(
                 | HostEvent::CommandFailed(_)
                 | HostEvent::Agent(AgentEvent::TextDelta { .. })
                 | HostEvent::Agent(AgentEvent::ToolStarted { .. })
-                | HostEvent::Agent(AgentEvent::ToolFinished { .. }) => {}
+                | HostEvent::Agent(AgentEvent::ToolFinished { .. })
+                | HostEvent::Agent(AgentEvent::DiagnosticsUpdated { .. }) => {}
             }
         }
 

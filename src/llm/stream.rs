@@ -1,4 +1,4 @@
-use super::protocol::{CalledFunction, ChatStreamResponse, LlmEvent, ToolCall};
+use super::protocol::{CalledFunction, ChatStreamResponse, LlmEvent, ToolCall, Usage};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 struct StreamChunk {
     #[serde(default)]
     choices: Vec<StreamChoice>,
+    #[serde(default)]
+    usage: Option<Usage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,6 +49,7 @@ pub(super) struct StreamAccumulator {
     content: String,
     reasoning_content: String,
     tool_calls: BTreeMap<usize, ToolCallBuilder>,
+    usage: Option<Usage>,
 }
 
 impl StreamAccumulator {
@@ -56,6 +59,9 @@ impl StreamAccumulator {
     {
         let chunk: StreamChunk =
             serde_json::from_str(data).context("decode SSE completion event")?;
+        if let Some(usage) = chunk.usage {
+            self.usage = Some(usage.normalized());
+        }
         for choice in chunk.choices {
             if let Some(text) = choice.delta.content
                 && !text.is_empty()
@@ -112,6 +118,7 @@ impl StreamAccumulator {
             reasoning_content: (!self.reasoning_content.is_empty())
                 .then_some(self.reasoning_content),
             tool_calls,
+            usage: self.usage,
         })
     }
 }

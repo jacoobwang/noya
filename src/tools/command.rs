@@ -17,6 +17,9 @@ impl Tool for RunCommand {
     fn description(&self) -> &str {
         "Run a non-interactive command in the workspace"
     }
+    fn risk(&self) -> super::ToolRisk {
+        super::ToolRisk::Dangerous
+    }
     fn parameters(&self) -> Value {
         json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false})
     }
