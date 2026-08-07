@@ -68,6 +68,8 @@ const COMMANDS: &[SlashCommand] = &[
     SlashCommand::optional("model", "[name]", "Choose or configure a model"),
     SlashCommand::optional("skill", "[name]", "List, activate, or manage Skills"),
     SlashCommand::always("sessions", None, "List sessions for this workspace"),
+    SlashCommand::always("tree", None, "Show the session tree and branches"),
+    SlashCommand::always("branch", Some("<name>"), "Create or select a session branch"),
     SlashCommand::optional("project", "[index|path]", "List or switch project workers"),
     SlashCommand::always("resume", Some("<id>"), "Resume a session by ID prefix"),
     SlashCommand::always("rename", Some("<title>"), "Rename the current session"),

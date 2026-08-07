@@ -190,6 +190,9 @@ noya session show 019fbd63
 noya session export 019fbd63 --format markdown
 noya session export 019fbd63 --format jsonl
 noya session fork 019fbd63
+noya session tree 019fbd63
+noya session branch-create 019fbd63 experiment
+noya session branch-select 019fbd63 <branch-uuid> --summary "handoff notes"
 noya session archive 019fbd63
 ```
 
@@ -226,6 +229,8 @@ TUI commands:
 /new        Create and switch to a new session
 /model      Choose a logged-in model, or switch with /model <name>
 /sessions   List sessions for the current workspace
+/tree       Show the current session tree and named branches
+/branch N   Create branch N; use `/branch select ID [summary]` to switch
 /resume ID  Switch to a session matching an ID prefix
 /rename T   Rename the active session
 /retry      Retry the latest failed, cancelled, or interrupted input

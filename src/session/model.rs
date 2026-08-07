@@ -84,6 +84,12 @@ pub struct SessionSummary {
     #[serde(default)]
     pub compaction_through_seq: Option<u64>,
     pub parent_session_id: Option<SessionId>,
+    #[serde(default)]
+    pub active_branch_id: Option<Uuid>,
+    #[serde(default)]
+    pub active_head_seq: u64,
+    #[serde(default)]
+    pub branch_count: usize,
     pub archived: bool,
     #[serde(default)]
     pub active_skills: Vec<ActiveSkillRecord>,
@@ -212,6 +218,55 @@ pub struct Transcript {
 pub struct SessionSnapshot {
     pub summary: SessionSummary,
     pub transcript: Transcript,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionTreeNode {
+    pub seq: u64,
+    pub parent_seq: Option<u64>,
+    pub event_type: String,
+    pub turn_id: Option<TurnId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionBranch {
+    pub branch_id: Uuid,
+    pub name: String,
+    pub from_seq: u64,
+    pub head_seq: u64,
+    pub created_seq: u64,
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub summary_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionTree {
+    pub nodes: Vec<SessionTreeNode>,
+    pub branches: Vec<SessionBranch>,
+    pub active_branch_id: Option<Uuid>,
+    pub active_head_seq: u64,
+}
+
+impl SessionTree {
+    pub fn active_path(&self) -> Vec<u64> {
+        let mut path = Vec::new();
+        let mut current = Some(self.active_head_seq);
+        while let Some(seq) = current {
+            path.push(seq);
+            current = self
+                .nodes
+                .iter()
+                .find(|node| node.seq == seq)
+                .and_then(|node| node.parent_seq);
+        }
+        path.reverse();
+        path
+    }
+
+    pub fn branch(&self, id: Uuid) -> Option<&SessionBranch> {
+        self.branches.iter().find(|branch| branch.branch_id == id)
+    }
 }
 
 impl Transcript {

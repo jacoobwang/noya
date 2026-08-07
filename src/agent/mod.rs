@@ -22,7 +22,8 @@ use crate::{
     model::Model,
     session::{
         ActiveSkillRecord, AssistantRecord, CompactionRecord, RunId, RuntimeSnapshot, Session,
-        SessionSummary, ToolCallRecord, ToolResultRecord, Transcript, TurnFailure, TurnId,
+        SessionSummary, SessionTree, ToolCallRecord, ToolResultRecord, Transcript, TurnFailure,
+        TurnId,
     },
     skills::{SkillInfo, SkillRegistry},
     tools::{ToolPolicy, ToolRegistry},
@@ -131,6 +132,30 @@ impl Agent {
 
     pub fn session_summary(&self) -> SessionSummary {
         self.session.summary()
+    }
+
+    pub fn session_tree(&self) -> SessionTree {
+        self.session.tree()
+    }
+
+    pub fn create_branch(&mut self, name: impl Into<String>) -> Result<Uuid> {
+        let branch_id = self.session.create_branch(name, None)?;
+        self.restart_runtime()?;
+        Ok(branch_id)
+    }
+
+    pub fn select_branch(&mut self, branch_prefix: &str, summary: Option<String>) -> Result<Uuid> {
+        let branch_id = self
+            .session_tree()
+            .branches
+            .iter()
+            .find(|branch| branch.branch_id.to_string().starts_with(branch_prefix))
+            .map(|branch| branch.branch_id)
+            .with_context(|| format!("branch '{branch_prefix}' was not found"))?;
+        let handoff = summary.map(|summary| (summary, self.llm.model_id().to_string()));
+        self.session.select_branch(branch_id, handoff)?;
+        self.restart_runtime()?;
+        Ok(branch_id)
     }
 
     pub fn transcript(&self) -> Transcript {

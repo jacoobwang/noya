@@ -712,6 +712,9 @@ noya sessions [--all] [--archived] [--json]
 noya session show <id> [--json]
 noya session export <id> [--format markdown|jsonl]
 noya session archive <id>
+noya session tree <id> [--json]
+noya session branch-create <id> <name> [--from-seq <seq>]
+noya session branch-select <id> <branch-uuid> [--summary <text>]
 ```
 
 全局参数：
@@ -742,6 +745,9 @@ SESSION       UPDATED              MODEL       TURNS  TITLE
 /rename <title>
 /retry
 /compact
+/tree
+/branch <name>
+/branch select <branch-id-prefix> [summary]
 ```
 
 更新命令语义：

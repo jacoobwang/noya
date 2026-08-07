@@ -6,12 +6,13 @@ mod filesystem;
 mod model;
 mod projection;
 mod recovery;
+mod tree;
 
 pub use model::{
     ActiveSkillRecord, AssistantRecord, CompactionRecord, CreateSession, ExportFormat, ModelContext,
     RunId, RuntimeSnapshot, SessionFilter, SessionId, SessionSnapshot, SessionStatus, SessionSummary,
-    ToolCallRecord, ToolResultRecord, Transcript, TranscriptItem, TranscriptKind, TurnFailure,
-    TurnId,
+    SessionBranch, SessionTree, SessionTreeNode, ToolCallRecord, ToolResultRecord, Transcript,
+    TranscriptItem, TranscriptKind, TurnFailure, TurnId,
 };
 
 use anyhow::{Context, Result, bail, ensure};
@@ -247,6 +248,12 @@ impl SessionManager {
         Ok(session)
     }
 
+    pub fn tree(&self, id: SessionId) -> Result<SessionTree> {
+        let directory = self.find_session_dir(id)?;
+        let events = filesystem::load_read_only(&directory.join("events.jsonl"))?;
+        Ok(Projection::replay(&events)?.tree())
+    }
+
     pub fn latest(&self, workspace: &Path) -> Result<Option<SessionSummary>> {
         let workspace = workspace
             .canonicalize()
@@ -467,6 +474,67 @@ impl Session {
 
     pub fn active_skills(&self) -> Vec<ActiveSkillRecord> {
         self.projection.active_skills()
+    }
+
+    pub fn tree(&self) -> SessionTree {
+        self.projection.tree()
+    }
+
+    pub fn create_branch(&mut self, name: impl Into<String>, from_seq: Option<u64>) -> Result<Uuid> {
+        ensure!(!self.projection.has_active_turn(), "cannot create a branch during an active turn");
+        let name = name.into().trim().to_string();
+        ensure!(!name.is_empty(), "branch name cannot be empty");
+        ensure!(name.chars().count() <= 120, "branch name cannot exceed 120 characters");
+        let from_seq = self.projection.tree().completed_turn_boundary(from_seq)?;
+        let branch_id = Uuid::new_v4();
+        self.append_with_parent(
+            SessionEvent::BranchCreated {
+                branch_id,
+                name,
+                from_seq,
+            },
+            self.current_run_id,
+            None,
+            Some(from_seq),
+            true,
+        )?;
+        Ok(branch_id)
+    }
+
+    pub fn select_branch(
+        &mut self,
+        branch_id: Uuid,
+        summary: Option<(String, String)>,
+    ) -> Result<()> {
+        ensure!(!self.projection.has_active_turn(), "cannot switch branches during an active turn");
+        let branch = self
+            .projection
+            .tree()
+            .branch(branch_id)
+            .cloned()
+            .context("branch does not exist")?;
+        self.append(
+            SessionEvent::BranchSelected {
+                branch_id,
+                head_seq: branch.head_seq,
+            },
+            None,
+            true,
+        )?;
+        if let Some((summary, summary_model)) = summary {
+            ensure!(!summary.trim().is_empty(), "branch summary cannot be empty");
+            self.append(
+                SessionEvent::BranchSummary {
+                    branch_id,
+                    from_seq: branch.head_seq,
+                    summary,
+                    summary_model,
+                },
+                None,
+                true,
+            )?;
+        }
+        Ok(())
     }
 
     pub fn directory(&self) -> Option<&Path> {
@@ -695,7 +763,19 @@ impl Session {
     }
 
     fn append(&mut self, event: SessionEvent, turn_id: Option<TurnId>, sync: bool) -> Result<u64> {
-        self.append_with_ids(event, self.current_run_id, turn_id, sync)
+        self.append_with_parent(event, self.current_run_id, turn_id, None, sync)
+    }
+
+    fn append_with_parent(
+        &mut self,
+        event: SessionEvent,
+        run_id: Option<RunId>,
+        turn_id: Option<TurnId>,
+        parent_seq: Option<u64>,
+        sync: bool,
+    ) -> Result<u64> {
+        let parent_seq = parent_seq.or_else(|| Some(self.projection.tree().active_head_seq));
+        self.append_with_ids_and_parent(event, run_id, turn_id, parent_seq, sync)
     }
 
     fn append_with_ids(
@@ -705,10 +785,31 @@ impl Session {
         turn_id: Option<TurnId>,
         sync: bool,
     ) -> Result<u64> {
+        self.append_with_parent(event, run_id, turn_id, None, sync)
+    }
+
+    fn append_with_ids_and_parent(
+        &mut self,
+        event: SessionEvent,
+        run_id: Option<RunId>,
+        turn_id: Option<TurnId>,
+        parent_seq: Option<u64>,
+        sync: bool,
+    ) -> Result<u64> {
         let seq = self.last_seq.saturating_add(1);
-        let envelope = EventEnvelope::new(self.id, seq, run_id, turn_id, event);
+        let envelope = EventEnvelope::new_with_parent(
+            self.id,
+            seq,
+            run_id,
+            turn_id,
+            parent_seq,
+            event,
+        );
         let mut next = self.projection.clone();
         next.apply(&envelope)?;
+        let mut tree = next.tree();
+        tree.add_node(&envelope)?;
+        next.set_tree(tree);
         self.write_envelope(&envelope, sync)?;
         self.projection = next;
         self.last_seq = seq;
@@ -1090,6 +1191,96 @@ mod tests {
         drop(parent);
         let child = manager.open(child_id).unwrap();
         assert_eq!(child.context().messages[0].content, "question 0");
+    }
+
+    #[test]
+    fn session_tree_switches_heads_and_replays_branch_summary() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let manager = SessionManager::at(directory.path());
+        let mut session = create_test_session(&manager, &workspace);
+
+        let base_turn = session.begin_turn("base question").unwrap();
+        session
+            .record_assistant(AssistantRecord {
+                message_id: Uuid::new_v4(),
+                content: "base answer".to_string(),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+            })
+            .unwrap();
+        session.finish_turn(&base_turn).unwrap();
+        let base_head = session.tree().active_head_seq;
+
+        let first_branch = session.create_branch("first", None).unwrap();
+        let first_turn = session.begin_turn("first question").unwrap();
+        session
+            .record_assistant(AssistantRecord {
+                message_id: Uuid::new_v4(),
+                content: "first answer".to_string(),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+            })
+            .unwrap();
+        session.finish_turn(&first_turn).unwrap();
+
+        let second_branch = session.create_branch("second", Some(base_head)).unwrap();
+        let second_turn = session.begin_turn("second question").unwrap();
+        session
+            .record_assistant(AssistantRecord {
+                message_id: Uuid::new_v4(),
+                content: "second answer".to_string(),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+            })
+            .unwrap();
+        session.finish_turn(&second_turn).unwrap();
+        let second_only_seq = session
+            .tree()
+            .nodes
+            .iter()
+            .find(|node| node.event_type == "turn_started" && node.turn_id == Some(second_turn))
+            .unwrap()
+            .seq;
+
+        session
+            .select_branch(
+                first_branch,
+                Some((
+                    "The first branch explored the original approach.".to_string(),
+                    "test-model".to_string(),
+                )),
+            )
+            .unwrap();
+
+        let tree = session.tree();
+        assert_eq!(tree.active_branch_id, Some(first_branch));
+        assert!(tree.active_path().contains(&base_head));
+        assert!(!tree.active_path().contains(&second_only_seq));
+        assert_eq!(
+            tree.branch(first_branch).unwrap().summary.as_deref(),
+            Some("The first branch explored the original approach.")
+        );
+        assert_eq!(
+            tree.branch(first_branch).unwrap().summary_model.as_deref(),
+            Some("test-model")
+        );
+        assert_eq!(tree.branch(second_branch).unwrap().name, "second");
+
+        let session_id = *session.id();
+        drop(session);
+        let reopened = manager.open(session_id).unwrap();
+        assert_eq!(reopened.tree().active_branch_id, Some(first_branch));
+        assert!(reopened
+            .context()
+            .messages
+            .iter()
+            .any(|message| message.content.contains("original approach")));
+        assert!(!reopened
+            .context()
+            .messages
+            .iter()
+            .any(|message| message.content.contains("second question")));
     }
 
     #[test]

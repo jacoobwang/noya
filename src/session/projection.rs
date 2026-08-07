@@ -1,9 +1,9 @@
 use super::{
     compaction::KEEP_RECENT_TURNS,
     event::{EventEnvelope, SCHEMA_VERSION, SessionEvent},
-        model::{
+    model::{
         ActiveSkillRecord, CompactionPlan, ModelContext, SessionStatus, SessionSummary, Transcript,
-        TranscriptItem, TranscriptKind, TurnId,
+        SessionTree, SessionTreeNode, TranscriptItem, TranscriptKind, TurnId,
     },
 };
 use crate::llm::ChatMessage;
@@ -19,6 +19,7 @@ pub(super) struct Projection {
     transcript: Transcript,
     compaction_summary: Option<String>,
     retry_input: Option<String>,
+    tree: SessionTree,
 }
 
 #[derive(Debug, Clone)]
@@ -72,8 +73,11 @@ impl Projection {
                 context_epoch: 0,
                 compaction_through_seq: None,
                 parent_session_id: created.parent_session_id,
-            archived: false,
-            active_skills: Vec::new(),
+                active_branch_id: None,
+                active_head_seq: 1,
+                branch_count: 0,
+                archived: false,
+                active_skills: Vec::new(),
             },
             committed: Vec::new(),
             completed: Vec::new(),
@@ -81,11 +85,23 @@ impl Projection {
             transcript: Transcript::default(),
             compaction_summary: None,
             retry_input: None,
+            tree: SessionTree {
+                nodes: vec![SessionTreeNode {
+                    seq: 1,
+                    parent_seq: None,
+                    event_type: "session_created".to_string(),
+                    turn_id: first.turn_id,
+                }],
+                active_head_seq: 1,
+                ..SessionTree::default()
+            },
         })
     }
 
     pub fn replay(events: &[EventEnvelope]) -> Result<Self> {
         let first = events.first().context("session log is empty")?;
+        let tree = SessionTree::replay(events)?;
+        let active_path = tree.active_path().into_iter().collect::<HashSet<_>>();
         let mut projection = Self::from_first(first)?;
         let mut expected = 2;
         for event in &events[1..] {
@@ -103,9 +119,17 @@ impl Projection {
                 "session sequence mismatch: expected {expected}, got {}",
                 event.seq
             );
-            projection.apply(event)?;
+            if active_path.contains(&event.seq) {
+                projection.apply(event)?;
+            }
             expected += 1;
         }
+        projection.tree = tree.clone();
+        projection.meta.last_seq = events.last().map_or(1, |event| event.seq);
+        projection.meta.updated_at = events.last().map_or(first.timestamp, |event| event.timestamp);
+        projection.meta.active_branch_id = tree.active_branch_id;
+        projection.meta.active_head_seq = tree.active_head_seq;
+        projection.meta.branch_count = tree.branches.len();
         Ok(projection)
     }
 
@@ -114,8 +138,8 @@ impl Projection {
             return Ok(());
         }
         ensure!(
-            envelope.seq == self.meta.last_seq + 1,
-            "session sequence must be contiguous"
+            envelope.seq > self.meta.last_seq,
+            "session sequence must increase"
         );
         match &envelope.event {
             SessionEvent::SessionCreated(_) => bail!("session_created can only be the first event"),
@@ -421,6 +445,32 @@ impl Projection {
             } => {
                 self.meta.parent_session_id = Some(*parent_session_id);
             }
+            SessionEvent::BranchCreated { .. }
+            | SessionEvent::BranchSelected { .. } => {
+                ensure!(self.active.is_none(), "cannot change branches during an active turn");
+            }
+            SessionEvent::BranchSummary { summary, .. } => {
+                ensure!(self.active.is_none(), "cannot add a branch summary during an active turn");
+                ensure!(!summary.trim().is_empty(), "branch summary cannot be empty");
+                self.committed.push(StoredMessage {
+                    seq: envelope.seq,
+                    message: ChatMessage {
+                        role: "system".to_string(),
+                        content: format!("Summary from another branch:\n{summary}"),
+                        reasoning_content: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                });
+                self.transcript.items.push(TranscriptItem {
+                    id: envelope.event_id,
+                    kind: TranscriptKind::System,
+                    content: "Branch summary added.".to_string(),
+                    turn_id: None,
+                    tool_call_id: None,
+                    interrupted: false,
+                });
+            }
             SessionEvent::SessionArchived => {
                 ensure!(self.active.is_none(), "cannot archive an active session");
                 self.meta.archived = true;
@@ -434,6 +484,17 @@ impl Projection {
 
     pub fn summary(&self) -> SessionSummary {
         self.meta.clone()
+    }
+
+    pub fn tree(&self) -> SessionTree {
+        self.tree.clone()
+    }
+
+    pub(super) fn set_tree(&mut self, tree: SessionTree) {
+        self.meta.active_branch_id = tree.active_branch_id;
+        self.meta.active_head_seq = tree.active_head_seq;
+        self.meta.branch_count = tree.branches.len();
+        self.tree = tree;
     }
 
     pub fn active_skills(&self) -> Vec<ActiveSkillRecord> {

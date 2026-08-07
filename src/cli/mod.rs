@@ -10,6 +10,7 @@ use noya::{
     tools::{ToolApprovalMode, ToolPolicy},
     tui,
 };
+use uuid::Uuid;
 use std::{
     env, fs,
     io::{self, Write},
@@ -141,6 +142,28 @@ enum SessionCommand {
         session_id: String,
         #[arg(long)]
         through_seq: Option<u64>,
+    },
+    /// Show the session event tree and named branches.
+    Tree {
+        session_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a named branch at the latest or selected completed turn.
+    BranchCreate {
+        session_id: String,
+        name: String,
+        #[arg(long)]
+        from_seq: Option<u64>,
+    },
+    /// Select a branch and optionally persist a handoff summary.
+    BranchSelect {
+        session_id: String,
+        branch_id: String,
+        #[arg(long)]
+        summary: Option<String>,
+        #[arg(long, default_value = "manual")]
+        summary_model: String,
     },
 }
 
@@ -536,6 +559,58 @@ fn session_command(command: SessionCommand) -> Result<()> {
             let id = manager.resolve_prefix(&session_id, true)?;
             let child = manager.fork(id, through_seq)?;
             println!("Forked session {} from {id}.", child.id());
+        }
+        SessionCommand::Tree { session_id, json } => {
+            let id = manager.resolve_prefix(&session_id, true)?;
+            let tree = manager.tree(id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&tree)?);
+            } else {
+                println!("active head: {}", tree.active_head_seq);
+                for branch in &tree.branches {
+                    let active = if tree.active_branch_id == Some(branch.branch_id) {
+                        " *"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "{}{}  {}  from={} head={}{}",
+                        &branch.branch_id.to_string()[..8],
+                        active,
+                        branch.name,
+                        branch.from_seq,
+                        branch.head_seq,
+                        branch.summary
+                            .as_deref()
+                            .map(|summary| format!("  summary={summary}"))
+                            .unwrap_or_default()
+                    );
+                }
+                println!("nodes: {}", tree.nodes.len());
+            }
+        }
+        SessionCommand::BranchCreate {
+            session_id,
+            name,
+            from_seq,
+        } => {
+            let id = manager.resolve_prefix(&session_id, false)?;
+            let mut session = manager.open(id)?;
+            let branch_id = session.create_branch(name, from_seq)?;
+            println!("Created branch {branch_id} in session {id}.");
+        }
+        SessionCommand::BranchSelect {
+            session_id,
+            branch_id,
+            summary,
+            summary_model,
+        } => {
+            let id = manager.resolve_prefix(&session_id, false)?;
+            let branch_id = Uuid::parse_str(&branch_id).context("invalid branch UUID")?;
+            let mut session = manager.open(id)?;
+            let handoff = summary.map(|summary| (summary, summary_model));
+            session.select_branch(branch_id, handoff)?;
+            println!("Selected branch {branch_id} in session {id}.");
         }
     }
     Ok(())

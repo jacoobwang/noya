@@ -134,6 +134,12 @@ pub enum TuiAction {
         authentication: AuthenticationMode,
     },
     ListSessions,
+    ShowTree,
+    CreateBranch(String),
+    SelectBranch {
+        prefix: String,
+        summary: Option<String>,
+    },
     ListProjects,
     SwitchProject(String),
     ResumeSession(String),
@@ -715,7 +721,7 @@ impl App {
             "/help" => {
                 self.add_message(Message::new(
                     MessageKind::System,
-                    "Commands: /help /new /model [name] /skills /skill <name> /sessions /project [index|path] /resume <id> /rename <title> /retry /compact /clear /reset /status /cancel /quit",
+                    "Commands: /help /new /model [name] /skills /skill <name> /sessions /tree /branch <name> /branch select <id> [summary] /project [index|path] /resume <id> /rename <title> /retry /compact /clear /reset /status /cancel /quit",
                 ));
                 TuiAction::None
             }
@@ -788,6 +794,33 @@ impl App {
                 TuiAction::None
             }
             "/sessions" => TuiAction::ListSessions,
+            "/tree" => TuiAction::ShowTree,
+            _ if input.starts_with("/branch ") && self.agent_state == AgentState::Idle => {
+                let argument = input[8..].trim();
+                if let Some(selection) = argument.strip_prefix("select ") {
+                    let mut parts = selection.trim().splitn(2, char::is_whitespace);
+                    let prefix = parts.next().unwrap_or_default().trim();
+                    let summary = parts.next().map(str::trim).filter(|value| !value.is_empty());
+                    if prefix.is_empty() {
+                        self.status_message = Some("Usage: /branch select <id> [summary]".to_string());
+                        TuiAction::None
+                    } else {
+                        TuiAction::SelectBranch {
+                            prefix: prefix.to_string(),
+                            summary: summary.map(str::to_string),
+                        }
+                    }
+                } else if argument.is_empty() {
+                    self.status_message = Some("Usage: /branch <name> or /branch select <id> [summary]".to_string());
+                    TuiAction::None
+                } else {
+                    TuiAction::CreateBranch(argument.to_string())
+                }
+            }
+            _ if input.starts_with("/branch ") => {
+                self.status_message = Some("Agent is busy; wait or use /cancel before changing branches.".to_string());
+                TuiAction::None
+            }
             "/project" if self.agent_state == AgentState::Idle => TuiAction::ListProjects,
             "/project" => {
                 self.status_message =
@@ -1285,6 +1318,21 @@ mod tests {
         assert_eq!(
             app.handle_submission("/sessions".to_string()),
             TuiAction::ListSessions
+        );
+        assert_eq!(
+            app.handle_submission("/tree".to_string()),
+            TuiAction::ShowTree
+        );
+        assert_eq!(
+            app.handle_submission("/branch experiment".to_string()),
+            TuiAction::CreateBranch("experiment".to_string())
+        );
+        assert_eq!(
+            app.handle_submission("/branch select 1234 handoff summary".to_string()),
+            TuiAction::SelectBranch {
+                prefix: "1234".to_string(),
+                summary: Some("handoff summary".to_string()),
+            }
         );
         assert_eq!(
             app.handle_submission("/resume 019fbd63".to_string()),

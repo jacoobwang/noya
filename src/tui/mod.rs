@@ -16,7 +16,7 @@ use crate::{
         AuthenticationMode, CredentialStore, Model, ModelCatalogStore, ModelOverrides, ModelStatus,
         ProviderProtocol, RuntimeModelConfig,
     },
-    session::{CreateSession, SessionFilter, SessionManager, SessionSummary, Transcript},
+    session::{CreateSession, SessionFilter, SessionManager, SessionSummary, SessionTree, Transcript},
 };
 use anyhow::{Context, Result, bail, ensure};
 use crossterm::terminal;
@@ -96,6 +96,12 @@ enum AgentCommand {
         authentication: AuthenticationMode,
     },
     ListSessions,
+    ShowTree,
+    CreateBranch(String),
+    SelectBranch {
+        prefix: String,
+        summary: Option<String>,
+    },
     ResumeSession(String),
     RenameSession(String),
     Retry,
@@ -412,6 +418,15 @@ fn apply_action(
         TuiAction::ListSessions => {
             let _ = send(AgentCommand::ListSessions);
         }
+        TuiAction::ShowTree => {
+            let _ = send(AgentCommand::ShowTree);
+        }
+        TuiAction::CreateBranch(name) => {
+            let _ = send(AgentCommand::CreateBranch(name));
+        }
+        TuiAction::SelectBranch { prefix, summary } => {
+            let _ = send(AgentCommand::SelectBranch { prefix, summary });
+        }
         TuiAction::ResumeSession(prefix) => {
             let _ = send(AgentCommand::ResumeSession(prefix));
         }
@@ -705,6 +720,9 @@ fn spawn_agent_host(
                                 | Some(AgentCommand::ListSkills)
                                 | Some(AgentCommand::FetchModelChoices { .. })
                                 | Some(AgentCommand::ConfigureModel { .. })
+                                | Some(AgentCommand::ShowTree)
+                                | Some(AgentCommand::CreateBranch(_))
+                                | Some(AgentCommand::SelectBranch { .. })
                                 | Some(AgentCommand::ResumeSession(_))
                                 | Some(AgentCommand::RenameSession(_))
                                 | Some(AgentCommand::Retry)
@@ -991,6 +1009,31 @@ fn spawn_agent_host(
                     }
                 }
                 AgentCommand::ListSessions => send_session_list(&event_tx, &manager, &agent),
+                AgentCommand::ShowTree => {
+                    let _ = event_tx.send(HostEvent::Notice(render_session_tree(&agent.session_tree())));
+                }
+                AgentCommand::CreateBranch(name) => match agent.create_branch(name) {
+                    Ok(branch_id) => {
+                        let _ = event_tx.send(session_updated(&agent));
+                        let _ = event_tx.send(HostEvent::Notice(format!("Created branch {branch_id}.")));
+                    }
+                    Err(error) => send_host_error(
+                        &event_tx,
+                        &format!("Failed to create branch: {error}"),
+                    ),
+                },
+                AgentCommand::SelectBranch { prefix, summary } => {
+                    match agent.select_branch(&prefix, summary) {
+                        Ok(branch_id) => {
+                            let _ = event_tx.send(session_changed(&agent));
+                            let _ = event_tx.send(HostEvent::Notice(format!("Selected branch {branch_id}.")));
+                        }
+                        Err(error) => send_host_error(
+                            &event_tx,
+                            &format!("Failed to select branch: {error}"),
+                        ),
+                    }
+                }
                 AgentCommand::ResumeSession(prefix) => {
                     let result = manager
                         .resolve_prefix(&prefix, false)
@@ -1739,6 +1782,39 @@ fn render_session_list(summaries: &[SessionSummary]) -> String {
             summary.completed_turns,
             summary.title
         ));
+    }
+    lines.join("\n")
+}
+
+fn render_session_tree(tree: &SessionTree) -> String {
+    let mut lines = vec![format!(
+        "Session tree: {} nodes, active head {}",
+        tree.nodes.len(),
+        tree.active_head_seq
+    )];
+    if tree.branches.is_empty() {
+        lines.push("No named branches.".to_string());
+    } else {
+        lines.push("Branches:".to_string());
+        for branch in &tree.branches {
+            let marker = if tree.active_branch_id == Some(branch.branch_id) {
+                "*"
+            } else {
+                " "
+            };
+            lines.push(format!(
+                "{marker} {}  {}  from={} head={}{}",
+                &branch.branch_id.to_string()[..8],
+                branch.name,
+                branch.from_seq,
+                branch.head_seq,
+                branch
+                    .summary
+                    .as_deref()
+                    .map(|summary| format!("\n    summary: {summary}"))
+                    .unwrap_or_default()
+            ));
+        }
     }
     lines.join("\n")
 }

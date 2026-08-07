@@ -17,6 +17,8 @@ pub struct EventEnvelope {
     pub session_id: SessionId,
     pub run_id: Option<RunId>,
     pub turn_id: Option<TurnId>,
+    #[serde(default)]
+    pub parent_seq: Option<u64>,
     #[serde(with = "time::serde::rfc3339")]
     pub timestamp: OffsetDateTime,
     pub event: SessionEvent,
@@ -30,6 +32,17 @@ impl EventEnvelope {
         turn_id: Option<TurnId>,
         event: SessionEvent,
     ) -> Self {
+        Self::new_with_parent(session_id, seq, run_id, turn_id, None, event)
+    }
+
+    pub fn new_with_parent(
+        session_id: SessionId,
+        seq: u64,
+        run_id: Option<RunId>,
+        turn_id: Option<TurnId>,
+        parent_seq: Option<u64>,
+        event: SessionEvent,
+    ) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             seq,
@@ -37,6 +50,7 @@ impl EventEnvelope {
             session_id,
             run_id,
             turn_id,
+            parent_seq,
             timestamp: OffsetDateTime::now_utc(),
             event,
         }
@@ -84,6 +98,21 @@ pub enum SessionEvent {
     SessionForked {
         parent_session_id: SessionId,
         through_seq: u64,
+    },
+    BranchCreated {
+        branch_id: Uuid,
+        name: String,
+        from_seq: u64,
+    },
+    BranchSelected {
+        branch_id: Uuid,
+        head_seq: u64,
+    },
+    BranchSummary {
+        branch_id: Uuid,
+        from_seq: u64,
+        summary: String,
+        summary_model: String,
     },
     SessionArchived,
 }
